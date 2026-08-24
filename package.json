@@ -1,7 +1,7 @@
 {
-  "name": "@sk-classroom/pi-pair-notebook",
-  "version": "0.5.6",
-  "description": "Pi extension that turns a coding agent into a Socratic tutor working with a student inside a marimo notebook: it runs the notebook server, gives the model a high-level nb_* toolkit, feeds it the curriculum one chapter at a time, keeps a verbatim session log, and lets the student appeal to a referee.",
+  "name": "@skojaku/pi-pair-notebook",
+  "version": "0.6.0",
+  "description": "A Socratic tutor that pairs with a student inside a marimo notebook: a pi extension with an nb_* toolkit, chapter orchestration, checkpoint ceremony, a verbatim session log, and a referee the student can appeal to. Ships the installer the student runs before pi exists, and the harness that reviews a module.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -12,17 +12,19 @@
   ],
   "license": "MIT",
   "author": "Sadamori Kojaku <skojaku@binghamton.edu>",
-  "homepage": "https://github.com/sk-classroom/pi-pair-notebook#readme",
+  "homepage": "https://github.com/skojaku/pi-pair-notebook#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sk-classroom/pi-pair-notebook.git"
+    "url": "git+https://github.com/skojaku/pi-pair-notebook.git"
   },
   "bugs": {
-    "url": "https://github.com/sk-classroom/pi-pair-notebook/issues"
+    "url": "https://github.com/skojaku/pi-pair-notebook/issues"
   },
   "type": "module",
   "files": [
     "extensions/",
+    "setup/",
+    "review/",
     "README.md",
     "LICENSE",
     "package.json"

@@ -14,10 +14,22 @@ package supplies the tools that operate on them. See
 [`sk-classroom/advnetsci-pair-notebook-m02-small-world`](https://github.com/sk-classroom/advnetsci-pair-notebook-m02-small-world)
 for a complete module.
 
+## What is in here
+
+This repository is the software, and only the software. The teaching material
+— chapter scripts, premade cells, the artwork, the notebook a module builds —
+lives with the course, and a module pins a version of this by tag.
+
+| | |
+|---|---|
+| `extensions/` | the pi extension: the `nb_*` toolkit, chapter orchestration, the checkpoint ceremony, the verbatim log, the referee |
+| `setup/setup-pi.mjs` | the installer a student runs **before pi exists**, so it cannot be delivered as a pi package — a module vendors it at publish time |
+| `review/` | the harness that drives a real session against a module: E2E setup and teardown, checkpoint probes, the widget and dialog drivers |
+
 ## Install
 
 ```bash
-pi install git:github.com/sk-classroom/pi-pair-notebook@v0.3.0
+pi install git:github.com/skojaku/pi-pair-notebook@v0.6.0
 pi install npm:@juicesharp/rpiv-ask-user-question@2.4.0   # required companion
 ```
 
@@ -27,7 +39,7 @@ installs them itself on startup — students run nothing by hand:
 ```json
 {
   "packages": [
-    "git:github.com/sk-classroom/pi-pair-notebook@v0.3.0",
+    "git:github.com/skojaku/pi-pair-notebook@v0.6.0",
     "npm:@juicesharp/rpiv-ask-user-question@2.4.0"
   ]
 }
