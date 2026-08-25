@@ -29,7 +29,7 @@ lives with the course, and a module pins a version of this by tag.
 ## Install
 
 ```bash
-pi install git:github.com/skojaku/pi-pair-notebook@v0.8.0
+pi install git:github.com/skojaku/pi-pair-notebook@v0.8.1
 pi install npm:@juicesharp/rpiv-ask-user-question@2.4.0   # required companion
 ```
 
@@ -39,7 +39,7 @@ installs them itself on startup — students run nothing by hand:
 ```json
 {
   "packages": [
-    "git:github.com/skojaku/pi-pair-notebook@v0.8.0",
+    "git:github.com/skojaku/pi-pair-notebook@v0.8.1",
     "npm:@juicesharp/rpiv-ask-user-question@2.4.0"
   ]
 }
@@ -98,9 +98,15 @@ mangled write takes the tutor down with it, mid-lesson, on the machine of
 someone who cannot get it back from a shell. So: an unreadable file is left
 alone rather than "fixed", other providers are never touched, entries that
 already exist are never rewritten, the student is asked yes/no first, and the
-write is a temp file and a rename. It needs a gateway whose `/v1/models`
-reports `name`, `reasoning` and `input`; without those a client cannot build a
-working entry, and the tool declines rather than guessing.
+write is a temp file and a rename.
+
+It needs a gateway whose `/v1/models` reports `input` — the modalities. A
+gateway too old to send them would have every alias written down as text-only,
+and `nb_view_image` would then find no image-capable model on the provider and
+start asking students to describe their drawing in words: a silent,
+plausible-looking failure caused by the tool that was meant to repair their
+setup. So it declines instead. `name` and `reasoning` are cosmetic by
+comparison and are allowed to default.
 
 ## What it gives the agent
 

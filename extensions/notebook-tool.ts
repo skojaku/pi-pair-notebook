@@ -1325,6 +1325,21 @@ async function planCourseModels(ctx: any): Promise<SetupPlan> {
   if (!Array.isArray(rows) || !rows.length) {
     return { kind: "skip", why: "the course server listed no models" };
   }
+  // Decline rather than default the modalities. A gateway too old to report
+  // `input` would have every alias written down as text-only, and the one
+  // that matters is the vision alias: nb_view_image picks the image-capable
+  // model on this provider, finds none, and the tutor starts telling students
+  // to describe their drawing in words. That is a silent, plausible-looking
+  // failure introduced by the tool meant to repair their setup. `name` and
+  // `reasoning` are cosmetic by comparison and are allowed to default.
+  if (!rows.every((r: any) => Array.isArray(r?.input) && r.input.length)) {
+    return {
+      kind: "skip",
+      why:
+        `the course server's model list does not say what each model can read, so ` +
+        `writing it down would guess — their instructor needs to update the server`,
+    };
+  }
 
   // No config at all means nothing was ever installed here. Writing a provider
   // block from scratch means inventing a baseUrl and a key reference, which is
