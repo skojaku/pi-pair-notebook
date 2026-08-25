@@ -29,7 +29,7 @@ lives with the course, and a module pins a version of this by tag.
 ## Install
 
 ```bash
-pi install git:github.com/skojaku/pi-pair-notebook@v0.7.0
+pi install git:github.com/skojaku/pi-pair-notebook@v0.8.0
 pi install npm:@juicesharp/rpiv-ask-user-question@2.4.0   # required companion
 ```
 
@@ -39,7 +39,7 @@ installs them itself on startup — students run nothing by hand:
 ```json
 {
   "packages": [
-    "git:github.com/skojaku/pi-pair-notebook@v0.7.0",
+    "git:github.com/skojaku/pi-pair-notebook@v0.8.0",
     "npm:@juicesharp/rpiv-ask-user-question@2.4.0"
   ]
 }
@@ -84,6 +84,24 @@ It is in the installer only because the installer is the one thing that writes
 there. The alias itself, and what it is allowed to be used for, belong to the
 course gateway.
 
+Which leaves the student who set up before the alias existed. Their clone pins
+a toolkit tag and pi skips pinned packages on update, so a gateway that grows
+an alias reaches them through nothing at all — the server serves it and their
+pi refuses to offer a model it has no local declaration for. The repair is two
+lines in a terminal, asked of the people least able to type them.
+
+`nb_update_setup` is that repair as a tool: it reads the gateway's own
+`/v1/models`, appends whatever the student's provider block is missing, and
+does nothing else. It is deliberately **not** a system prompt telling the
+tutor to edit the file — `models.json` is what makes pi run at all, and a
+mangled write takes the tutor down with it, mid-lesson, on the machine of
+someone who cannot get it back from a shell. So: an unreadable file is left
+alone rather than "fixed", other providers are never touched, entries that
+already exist are never rewritten, the student is asked yes/no first, and the
+write is a temp file and a rename. It needs a gateway whose `/v1/models`
+reports `name`, `reasoning` and `input`; without those a client cannot build a
+working entry, and the tool declines rather than guessing.
+
 ## What it gives the agent
 
 One toolkit, `nb_*`, instead of raw bash and marimo code-mode boilerplate. The
@@ -104,6 +122,7 @@ things a prompt cannot.
 | `log_detour` | record an off-script question and the souvenir cell that answered it |
 | `chapter_done` | gate the chapter transition on the student's own answer, write the handoff brief, load the next chapter |
 | `nb_fresh_start` | clear the notebook when the student chooses to start over |
+| `nb_update_setup` | add course models their pi does not know about yet, with their yes/no and a backup. Only when they ask (see above) |
 
 Six behaviours are worth knowing about, because they are what make the
 artifact trustworthy rather than plausible:

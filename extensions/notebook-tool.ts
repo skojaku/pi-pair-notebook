@@ -21,6 +21,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -1234,6 +1235,150 @@ async function preflightProvider(ctx: any): Promise<string | null> {
       `Could not reach the course server at ${baseUrl} — ${why}.\n` +
       `If you are online, the address in your settings may be out of date.\n${fix}`
     );
+  }
+}
+
+// ── Keeping the student's course models current ─────────────────────────────
+// models.json is written once, by the installer, before pi exists. After that
+// a student's clone pins a toolkit tag and pi skips pinned packages on update
+// (`pi update --extensions` leaves a pinned ref alone, by design), so a course
+// gateway that grows an alias reaches nobody: the server serves it and every
+// client refuses to offer a model it holds no local declaration for. The
+// repair is two lines in a terminal — which is exactly what to avoid asking of
+// the students this is trying not to lose.
+//
+// Hence a tool. Not a system prompt telling the model to edit the file
+// itself: this file is what makes pi run at all, and a mangled write takes the
+// tutor down with it, mid-lesson, on the machine of someone who cannot get it
+// back from a shell. Everything here is about never being the cause of that.
+// An unreadable file is left alone rather than "fixed". Other providers are
+// never touched. Entries that already exist are never rewritten — only
+// missing ones are appended, so a student who has tuned a setting keeps it.
+// The write is a temp file and a rename, because a half-written models.json
+// is the failure this whole design is trying not to cause.
+const PI_MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
+
+/** One `/v1/models` row as a pi catalogue entry. */
+function catalogueEntry(row: any) {
+  const input =
+    Array.isArray(row?.input) && row.input.length ? row.input.map(String) : ["text"];
+  return {
+    id: String(row.id),
+    name: String(row.name ?? row.id),
+    ...(row.reasoning ? { reasoning: true } : {}),
+    input,
+    // The course gateway is free to the student and meters requests and
+    // tokens, not dollars. A price here would put a running bill on screen
+    // for an allowance that is not money.
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: Number(row.context_window ?? 131072),
+    maxTokens: Number(row.max_tokens ?? 8192),
+  };
+}
+
+type SetupPlan =
+  | { kind: "current" }
+  | { kind: "add"; provider: string; missing: any[]; data: any }
+  | { kind: "skip"; why: string };
+
+/** What would change, without changing anything. */
+async function planCourseModels(ctx: any): Promise<SetupPlan> {
+  const model = ctx?.model;
+  const provider = model?.provider;
+  if (!provider) return { kind: "skip", why: "this session has no provider to check" };
+
+  let auth: any;
+  try {
+    auth = await ctx.modelRegistry?.getApiKeyAndHeaders?.(model);
+  } catch {
+    auth = null;
+  }
+  if (!auth?.ok) return { kind: "skip", why: "their course key cannot be read from here" };
+
+  const baseUrl = String(
+    auth.baseUrl ?? ctx.modelRegistry?.getProvider?.(provider)?.baseUrl ?? "",
+  ).replace(/\/+$/, "");
+  // The same guard preflightProvider uses: a built-in provider speaking its
+  // own vendor's endpoint is not a course gateway and has no catalogue of ours.
+  if (!/^https?:\/\//.test(baseUrl)) {
+    return { kind: "skip", why: "this session is not running on a course gateway" };
+  }
+
+  let rows: any;
+  try {
+    const res = await fetch(`${baseUrl}/models`, {
+      headers: {
+        ...(auth.headers ?? {}),
+        ...(auth.apiKey ? { Authorization: `Bearer ${auth.apiKey}` } : {}),
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      return { kind: "skip", why: `the course server answered HTTP ${res.status}` };
+    }
+    rows = (await res.json())?.data;
+  } catch (e: any) {
+    const why =
+      e?.name === "TimeoutError" ? "it did not answer in 15 seconds" : (e?.message ?? String(e));
+    return { kind: "skip", why: `the course server could not be reached — ${why}` };
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    return { kind: "skip", why: "the course server listed no models" };
+  }
+
+  // No config at all means nothing was ever installed here. Writing a provider
+  // block from scratch means inventing a baseUrl and a key reference, which is
+  // the installer's job and not a guess to make in the middle of a lesson.
+  if (!fs.existsSync(PI_MODELS_JSON)) {
+    return { kind: "skip", why: "there is no pi settings file on this machine to update" };
+  }
+  let data: any;
+  try {
+    data = JSON.parse(fs.readFileSync(PI_MODELS_JSON, "utf8"));
+  } catch (e: any) {
+    return {
+      kind: "skip",
+      why:
+        `their pi settings file is not valid JSON (${e?.message ?? e}). It was NOT ` +
+        `touched and must not be — say their instructor needs to look at it`,
+    };
+  }
+  const block = data?.providers?.[provider];
+  if (!block || !Array.isArray(block.models)) {
+    return { kind: "skip", why: "their pi settings hold no course provider to add to" };
+  }
+
+  const have = new Set(block.models.map((m: any) => String(m?.id)));
+  const missing = rows
+    .filter((r: any) => r?.id && !have.has(String(r.id)))
+    .map(catalogueEntry);
+  return missing.length ? { kind: "add", provider, missing, data } : { kind: "current" };
+}
+
+/** Writes the plan. Returns null on success, or why it failed. */
+function applyCourseModels(plan: Extract<SetupPlan, { kind: "add" }>): string | null {
+  const tmp = `${PI_MODELS_JSON}.tmp-${process.pid}`;
+  try {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\..*/, "")
+      .replace("T", "-");
+    fs.copyFileSync(PI_MODELS_JSON, `${PI_MODELS_JSON}.bak-${stamp}`);
+    plan.data.providers[plan.provider].models.push(...plan.missing);
+    // Rename, not a second write over the real file: an interrupted write
+    // leaves models.json truncated, and a student whose pi no longer starts
+    // cannot be talked through restoring the backup.
+    fs.writeFileSync(tmp, JSON.stringify(plan.data, null, 2) + "\n");
+    fs.renameSync(tmp, PI_MODELS_JSON);
+    return null;
+  } catch (e: any) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* best effort */
+    }
+    return String(e?.message ?? e);
   }
 }
 
@@ -4748,6 +4893,106 @@ export default function (pi: ExtensionAPI) {
       });
     },
     ...quiet("Handing your work in…"),
+  });
+
+  // ── nb_update_setup ───────────────────────────────────────────────────────
+  pi.registerTool({
+    name: "nb_update_setup",
+    label: "Update course setup",
+    description:
+      "Add course models the student's pi does not know about yet. Call this ONLY when " +
+      "they say pi cannot find a course model, or ask to update their setup. NEVER offer " +
+      "it unprompted, never mid-checkpoint, and never as a fix for anything going wrong " +
+      "in the notebook — it has nothing to do with the lesson. It asks the student's " +
+      "permission itself, adds only what is missing, and backs their settings up first. " +
+      "Their notebook, their log and their work are not touched.",
+    promptSnippet: "Add missing course models to the student's pi settings",
+    parameters: Type.Object({ status: STATUS_PARAM }),
+    execute: async () => {
+      const ctx = lastCtx;
+      const plan = await planCourseModels(ctx);
+
+      if (plan.kind === "skip") {
+        return toResult({
+          out:
+            `NOT UPDATED — ${plan.why}. Nothing was changed. Say in ONE warm line that ` +
+            `you could not update it from here and their instructor will sort it out, ` +
+            `then go straight back to the lesson. Do NOT ask them to type anything, do ` +
+            `NOT try another way, and do NOT call this again this session.`,
+          failed: false,
+        });
+      }
+
+      if (plan.kind === "current") {
+        return toResult({
+          out:
+            `Nothing to do — their settings already list every course model. If they ` +
+            `told you pi could not find one, the likely answer is that pi has not been ` +
+            `restarted since it was added: say so in ONE line ("it'll be there next time ` +
+            `you start it"), then back to the lesson.`,
+          failed: false,
+        });
+      }
+
+      const names = plan.missing.map((m: any) => m.id);
+      const YES = "Yes, update my settings";
+      const NO = "No, leave it alone";
+      const { choice, typed, asked } = await askStudent(
+        ctx,
+        `Add ${names.length > 1 ? "these course models" : "the course model"} ` +
+          `${names.map((n: string) => `"${n}"`).join(", ")} to your pi settings? ` +
+          `Your lesson is not affected either way.`,
+        [YES, NO],
+      );
+
+      // No picker, no consent. Writing to their settings on the strength of
+      // something the model believes it heard is exactly the shortcut this
+      // tool exists to avoid.
+      if (!asked) {
+        return toResult({
+          out:
+            `NOT UPDATED — this session cannot show them the yes/no box, so there is no ` +
+            `way to ask permission, and their settings were not touched. Tell them in ` +
+            `one line that their instructor will sort it out, then back to the lesson.`,
+          failed: false,
+        });
+      }
+      if (choice !== YES) {
+        return toResult({
+          out:
+            (choice === NO
+              ? `They said no. Nothing was changed. `
+              : typed
+                ? `They did not pick yes — they typed this instead: "${typed}". Nothing was ` +
+                  `changed. React to what they said, `
+                : `They closed the box without answering. Nothing was changed. `) +
+            `Do not ask again and do not bring it up later. Back to the lesson.`,
+          failed: false,
+        });
+      }
+
+      const failure = applyCourseModels(plan);
+      if (failure) {
+        return toResult({
+          out:
+            `NOT UPDATED — writing their settings failed: ${failure}\n` +
+            `Their old settings are intact and their lesson is unaffected. One warm line ` +
+            `that their instructor will sort it out, then back to the lesson.`,
+          failed: false,
+        });
+      }
+      return toResult({
+        out:
+          `Added ${names.join(", ")} to their pi settings (the old file is backed up ` +
+          `beside it). It does NOT appear in this session — pi reads that file when it ` +
+          `starts. Tell them in ONE line that it is set up and will be there the next ` +
+          `time they start pi, and that nothing about this lesson has changed. Then go ` +
+          `straight back to the lesson — do not explain the file, the folder, or what ` +
+          `you just did.`,
+        failed: false,
+      });
+    },
+    ...quiet("Checking your course settings…"),
   });
 
   // ── log_detour ────────────────────────────────────────────────────────────
