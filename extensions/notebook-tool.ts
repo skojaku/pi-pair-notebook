@@ -875,9 +875,11 @@ function resolveRefereeModel(ctx: any): any | null {
   const reg = ctx?.modelRegistry;
   if (!reg) return null;
   // Default to a "referee" model on the tutor's OWN provider — a course
-  // gateway publishes tutor / vision / referee as three aliases, and the
-  // student has credentials for exactly that provider and no other. The
-  // launcher used to export this; nothing exports anything now.
+  // gateway publishes tutor / vision / referee among its aliases, and the
+  // student has credentials for exactly that provider and no other. Looked up
+  // by exact id, so a gateway that grows aliases (an `assistant` for the rest
+  // of the course) does not change what the appeal reaches. The launcher used
+  // to export this; nothing exports anything now.
   const sameProvider = ctx?.model?.provider
     ? (reg.find?.(ctx.model.provider, "referee") ?? null)
     : null;

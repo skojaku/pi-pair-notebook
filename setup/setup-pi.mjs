@@ -131,6 +131,13 @@ const netsci = {
   models: [
     { id: "tutor", name: "Course Tutor", reasoning: true, input: ["text"],
       contextWindow: 131072, maxTokens: 32768, cost: zero },
+    // The same key outside the notebook: lecture questions, the mini-project,
+    // other assignments. A separate alias rather than a looser tutor, because
+    // the tutor's Socratic contract is what makes the graded notebook worth
+    // grading. Written here so it lands in the student's models.json with
+    // everything else; the module itself never names it.
+    { id: "assistant", name: "Course Assistant", reasoning: true, input: ["text"],
+      contextWindow: 131072, maxTokens: 32768, cost: zero },
     { id: "vision", name: "Course Vision", input: ["text", "image"],
       contextWindow: 1048576, maxTokens: 8192, cost: zero },
     { id: "referee", name: "Course Referee", reasoning: true, input: ["text"],
@@ -164,7 +171,7 @@ data.providers ??= {};
 const kept = Object.keys(data.providers).filter((k) => k !== "netsci");
 data.providers.netsci = netsci;
 fs.writeFileSync(MODELS, JSON.stringify(data, null, 2) + "\n");
-line(`   wrote the netsci provider (tutor, vision, referee) to ${MODELS}`);
+line(`   wrote the netsci provider (tutor, assistant, vision, referee) to ${MODELS}`);
 if (kept.length) line(`   kept your other providers: ${kept.sort().join(", ")}`);
 ok("course model configured");
 
@@ -310,6 +317,14 @@ if (todo === 0) {
   say("You are set. Start your session with:");
   line(`\n     ${c.b}pi${c.off}\n`);
   line(`${c.dim}   (the first start also downloads your tutor's toolkit — give it a minute)${c.off}\n`);
+  // Said once, here, because this screen is the one every student reads. Kept
+  // away from the line above and told where NOT to run it: a student who opens
+  // the lesson with the wrong model gets an agent with none of the notebook
+  // tools and no idea why.
+  line(`   Your key also works on the rest of the course — in ${c.b}any other folder${c.off}:`);
+  line(`\n     ${c.b}pi --model netsci/assistant${c.off}\n`);
+  line(`${c.dim}   Lecture questions, the mini-project, your other assignments. Not exams.${c.off}`);
+  line(`${c.dim}   In THIS folder just run 'pi' — the lesson needs the tutor.${c.off}\n`);
 } else {
   say(`Almost there — ${todo} thing(s) above still need you. Run me again afterwards.`);
   line(`${c.dim}   (nothing is broken; the steps above are one-time.)${c.off}\n`);
