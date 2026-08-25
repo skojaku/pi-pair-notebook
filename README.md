@@ -23,13 +23,13 @@ lives with the course, and a module pins a version of this by tag.
 | | |
 |---|---|
 | `extensions/` | the pi extension: the `nb_*` toolkit, chapter orchestration, the checkpoint ceremony, the verbatim log, the referee |
-| `setup/setup-pi.mjs` | the installer a student runs **before pi exists**, so it cannot be delivered as a pi package — a module vendors it at publish time |
+| `setup/setup-pi.mjs` | the installer a student runs **before pi exists**, so it cannot be delivered as a pi package — a module vendors it at publish time. It writes the course provider block, `tutor` and `assistant` included (see below) |
 | `review/` | the harness that drives a real session against a module: E2E setup and teardown, checkpoint probes, the widget and dialog drivers |
 
 ## Install
 
 ```bash
-pi install git:github.com/skojaku/pi-pair-notebook@v0.6.0
+pi install git:github.com/skojaku/pi-pair-notebook@v0.7.0
 pi install npm:@juicesharp/rpiv-ask-user-question@2.4.0   # required companion
 ```
 
@@ -39,7 +39,7 @@ installs them itself on startup — students run nothing by hand:
 ```json
 {
   "packages": [
-    "git:github.com/skojaku/pi-pair-notebook@v0.6.0",
+    "git:github.com/skojaku/pi-pair-notebook@v0.7.0",
     "npm:@juicesharp/rpiv-ask-user-question@2.4.0"
   ]
 }
@@ -69,6 +69,20 @@ pass on the command line:
 ```
 
 So the student's whole command is `pi`.
+
+### `assistant`, and why it is not this package's business
+
+The installer writes a fourth model into the student's provider block,
+`assistant`, and nothing in here ever names it. It is the same course key with
+the tutor's Socratic contract removed — for lecture questions, the
+mini-project, the rest of a course — and it exists as a separate alias
+precisely so that loosening it cannot reach a graded session. The module pins
+`netsci/tutor`; a student runs `pi --model netsci/assistant` somewhere else.
+
+It is in the installer only because the installer is the one thing that writes
+`~/.pi/agent/models.json`, and pi will not use a model that is not declared
+there. The alias itself, and what it is allowed to be used for, belong to the
+course gateway.
 
 ## What it gives the agent
 

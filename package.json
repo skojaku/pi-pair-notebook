@@ -1,6 +1,6 @@
 {
   "name": "@skojaku/pi-pair-notebook",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A Socratic tutor that pairs with a student inside a marimo notebook: a pi extension with an nb_* toolkit, chapter orchestration, checkpoint ceremony, a verbatim session log, and a referee the student can appeal to. Ships the installer the student runs before pi exists, and the harness that reviews a module.",
   "keywords": [
     "pi-package",
