@@ -212,6 +212,57 @@ try {
   line(`     start instead. Answer ${c.b}Trust${c.off} (the first option).`);
 }
 
+// --- what plain `pi` starts, outside a lesson --------------------------------
+// A module folder names its own defaultProvider/defaultModel, and pi's project
+// settings override the global ones (`.pi/settings.json` beats
+// `~/.pi/agent/settings.json`), so nothing written here can reach a lesson:
+// inside a module, `pi` is still the tutor.
+//
+// Outside one there was no default at all. pi falls back to its own — google —
+// which a student has no key for, so plain `pi` anywhere else failed, and the
+// only way in was a flag. "Type pi --model netsci/assistant" is a sentence
+// that has to be remembered, transcribed and got right, by the students least
+// able to do any of the three. Setting it once here means the answer to "how
+// do I use it for the mini-project?" is `pi`.
+//
+// Only when the slot is empty, or already ours. Someone with their own default
+// has chosen it, and an installer for one course is not the thing to overrule
+// that — say what was skipped and how to do it by hand instead.
+say("Setting what plain `pi` starts outside a lesson");
+const SETTINGS = path.join(os.homedir(), ".pi", "agent", "settings.json");
+try {
+  let settings = {};
+  if (fs.existsSync(SETTINGS) && fs.statSync(SETTINGS).size > 0) {
+    settings = JSON.parse(fs.readFileSync(SETTINGS, "utf8"));
+    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+      throw new Error("not a JSON object");
+    }
+  }
+  const current = settings.defaultProvider;
+  if (current && current !== "netsci") {
+    warn(`you already have a default model set (${current}) — leaving it alone.`);
+    line(`     Your course models still work; name one when you want it:`);
+    line(`\n         ${c.b}pi --model netsci/assistant${c.off}\n`);
+  } else if (settings.defaultModel === "assistant" && current === "netsci") {
+    ok("already set");
+  } else {
+    if (fs.existsSync(SETTINGS)) {
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "").replace("T", "-");
+      fs.copyFileSync(SETTINGS, `${SETTINGS}.bak-${stamp}`);
+    }
+    settings.defaultProvider = "netsci";
+    settings.defaultModel = "assistant";
+    fs.mkdirSync(path.dirname(SETTINGS), { recursive: true });
+    fs.writeFileSync(SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+    ok("outside a lesson, `pi` now starts your course assistant");
+  }
+} catch (e) {
+  // Never fatal: without it they need the flag, which is where we started.
+  warn(`could not set your default model (${e.message}).`);
+  line(`     Not a problem — outside a lesson, name it instead:`);
+  line(`\n         ${c.b}pi --model netsci/assistant${c.off}\n`);
+}
+
 // --- the key -----------------------------------------------------------------
 const rawKey = process.env.NETSCI_API_KEY;
 // A key arrives by email and gets pasted, so it arrives wrapped in quotes, with
@@ -317,14 +368,13 @@ if (todo === 0) {
   say("You are set. Start your session with:");
   line(`\n     ${c.b}pi${c.off}\n`);
   line(`${c.dim}   (the first start also downloads your tutor's toolkit — give it a minute)${c.off}\n`);
-  // Said once, here, because this screen is the one every student reads. Kept
-  // away from the line above and told where NOT to run it: a student who opens
-  // the lesson with the wrong model gets an agent with none of the notebook
-  // tools and no idea why.
-  line(`   Your key also works on the rest of the course — in ${c.b}any other folder${c.off}:`);
-  line(`\n     ${c.b}pi --model netsci/assistant${c.off}\n`);
-  line(`${c.dim}   Lecture questions, the mini-project, your other assignments. Not exams.${c.off}`);
-  line(`${c.dim}   In THIS folder just run 'pi' — the lesson needs the tutor.${c.off}\n`);
+  // Said once, here, because this screen is the one every student reads. It is
+  // the same word in both places on purpose: the folder decides which one
+  // answers, so there is no flag to remember and no wrong way to start.
+  line(`   Your key works on the rest of the course too. ${c.b}pi${c.off} in any other`);
+  line(`   folder starts your course assistant instead of the tutor —`);
+  line(`   lecture questions, the mini-project, your other assignments.`);
+  line(`${c.dim}   Not exams. In THIS folder 'pi' is always your tutor.${c.off}\n`);
 } else {
   say(`Almost there — ${todo} thing(s) above still need you. Run me again afterwards.`);
   line(`${c.dim}   (nothing is broken; the steps above are one-time.)${c.off}\n`);

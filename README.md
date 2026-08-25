@@ -29,7 +29,7 @@ lives with the course, and a module pins a version of this by tag.
 ## Install
 
 ```bash
-pi install git:github.com/skojaku/pi-pair-notebook@v0.8.1
+pi install git:github.com/skojaku/pi-pair-notebook@v0.9.0
 pi install npm:@juicesharp/rpiv-ask-user-question@2.4.0   # required companion
 ```
 
@@ -39,7 +39,7 @@ installs them itself on startup — students run nothing by hand:
 ```json
 {
   "packages": [
-    "git:github.com/skojaku/pi-pair-notebook@v0.8.1",
+    "git:github.com/skojaku/pi-pair-notebook@v0.9.0",
     "npm:@juicesharp/rpiv-ask-user-question@2.4.0"
   ]
 }
@@ -76,13 +76,21 @@ The installer writes a fourth model into the student's provider block,
 `assistant`, and nothing in here ever names it. It is the same course key with
 the tutor's Socratic contract removed — for lecture questions, the
 mini-project, the rest of a course — and it exists as a separate alias
-precisely so that loosening it cannot reach a graded session. The module pins
-`netsci/tutor`; a student runs `pi --model netsci/assistant` somewhere else.
+precisely so that loosening it cannot reach a graded session.
+
+**The folder decides which one answers, so there is no flag to remember.** The
+installer sets `netsci/assistant` as the global default in
+`~/.pi/agent/settings.json`, and a module's own `.pi/settings.json` names
+`netsci/tutor` — project settings beat global ones in pi, so `pi` is the tutor
+inside a lesson and the assistant everywhere else. Same word, no wrong way to
+start it. A student who already has a default of their own keeps it and is
+shown the `--model` form instead; a settings file that will not parse is left
+alone rather than replaced.
 
 It is in the installer only because the installer is the one thing that writes
-`~/.pi/agent/models.json`, and pi will not use a model that is not declared
-there. The alias itself, and what it is allowed to be used for, belong to the
-course gateway.
+`~/.pi/agent/`, and pi will not use a model that is not declared in
+`models.json`. The alias itself, and what it is allowed to be used for, belong
+to the course gateway.
 
 Which leaves the student who set up before the alias existed. Their clone pins
 a toolkit tag and pi skips pinned packages on update, so a gateway that grows
