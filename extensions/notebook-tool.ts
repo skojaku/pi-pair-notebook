@@ -3611,11 +3611,68 @@ export default function (pi: ExtensionAPI) {
   // flash-class models can fall into degenerate repetition loops. Abort the
   // generation if a single message runs absurdly long, and nudge a restart.
   const RUNAWAY_CHARS = 1600;
+
+  // The ceiling alone does not catch the shape this actually takes. A student
+  // sent in a screenshot of the tutor asking "how many bridges land on it?" and
+  // then answering itself: "user5, so it must revisit at least once." followed
+  // by the same sentence three times over, then a tool call — around 900
+  // characters, well under the ceiling, with the student never getting the
+  // keyboard back. Two cheaper tells fire first now, and both fire within a
+  // sentence or two rather than after a page.
+
+  // A leaked turn header. Chat templates write the next speaker as a bare
+  // lowercase "user"/"assistant"/"system", and a model that runs past its own
+  // end-of-turn emits it verbatim, glued to the reply it then writes for the
+  // student — which is where the "user5" above comes from.
+  //
+  // \b would not catch "user5": both sides are word characters, so there is no
+  // boundary between them. Hence the negative lookahead — which also keeps
+  // "users" out. The second lookahead requires a character to FOLLOW the match:
+  // mid-stream the buffer ends wherever the chunk ended, and "…\nuser" with
+  // nothing after it is as likely to become "users of the bridge" as a header.
+  // Lowercase only, deliberately: a sentence opening with "User" is prose, and
+  // capitalisation is the one thing the template form never has.
+  const TURN_HEADER = /(?:^|\n)(?:user|assistant|system)(?![a-z])(?=[\s\S])/;
+  const SPECIAL_TOKEN = /<\|(?:im_start|im_end|start_header_id|end_header_id|eot_id)\|>/;
+
+  /** The same sentence three times over is a loop, not an explanation. */
+  const repeatedLine = (t: string): boolean => {
+    const seen = new Map<string, number>();
+    for (const raw of t.split("\n")) {
+      const l = raw.trim();
+      // Short lines repeat honestly — "Right." and "Yes, exactly." are how the
+      // tutor is supposed to sound — and a table row or a quoted line repeats
+      // by construction. Neither is a loop.
+      if (l.length < 15 || !/[A-Za-z]/.test(l) || /^[|>]/.test(l)) continue;
+      const n = (seen.get(l) ?? 0) + 1;
+      if (n >= 3) return true;
+      seen.set(l, n);
+    }
+    return false;
+  };
+
+  // Every one of these must start with a phrase INJECTED_PREFIX knows, or the
+  // note is filed as the student's own words and quoted back at them.
+  const RUNAWAY_NOTE: Record<string, string> = {
+    length:
+      "NOTE (invisible to the student): your message ran away and was cut off. " +
+      "Continue with one short message.",
+    loop:
+      "NOTE (invisible to the student): you began repeating the same sentence and " +
+      "were cut off. Say ONE short line and end your turn.",
+    header:
+      "NOTE (invisible to the student): you started writing the student's reply for " +
+      "them and were cut off. Stop at your own question — say ONE short line, end " +
+      "your turn, and wait for what they actually type.",
+  };
+
   let runawayFired = false;
   pi.on("message_update", async (event: any, ctx: any) => {
     const msg = event?.message;
     if (msg?.role !== "assistant" || runawayFired) return;
     const raw = msg.content;
+    // Text parts only. A reasoning trace says "user wants…" as a matter of
+    // course, and it is not the tutor speaking to anyone.
     const t =
       typeof raw === "string"
         ? raw
@@ -3623,7 +3680,15 @@ export default function (pi: ExtensionAPI) {
             .filter((c: any) => c?.type === "text")
             .map((c: any) => c.text ?? "")
             .join("\n");
-    if (t.length <= RUNAWAY_CHARS) return;
+    const reason =
+      TURN_HEADER.test(t) || SPECIAL_TOKEN.test(t)
+        ? "header"
+        : repeatedLine(t)
+          ? "loop"
+          : t.length > RUNAWAY_CHARS
+            ? "length"
+            : null;
+    if (!reason) return;
     runawayFired = true;
     try {
       ctx.abort();
@@ -3633,9 +3698,7 @@ export default function (pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "runaway-guard",
-        content:
-          "NOTE (invisible to the student): your message ran away and was cut off. " +
-          "Continue with one short message.",
+        content: RUNAWAY_NOTE[reason],
         display: false,
       },
       { deliverAs: "followUp", triggerTurn: true },
