@@ -4878,6 +4878,35 @@ export default function (pi: ExtensionAPI) {
                 ` — quote their turns as they typed them, joined with " · "`,
             );
           }
+          // slotDrift only asks what the quote ADDS. It cannot see what the
+          // quote LEAVES OFF, and a practice round lost a student's reasoning
+          // that way: they typed "6 choose 2 is 15, and the outer friends each
+          // only have 1 friend so they cant center any" and the note quoted
+          // "6 choose 2 is 15" — the arithmetic kept, the thinking dropped, on
+          // a checkpoint whose whole point was the thinking. Nothing was
+          // added, so nothing fired.
+          //
+          // Only a segment that is the OPENING of a message they typed counts.
+          // Quoting some of their turns and not others is what the skeleton
+          // path does on purpose; cutting one of them in half is not.
+          for (const seg of quoted.split("·").map((s) => s.trim().replace(/^"|"$/g, ""))) {
+            const segN = normMsg(seg);
+            if (segN.split(" ").length < 2) continue;
+            const whole = said.find((m) => {
+              const mN = normMsg(m);
+              return mN.startsWith(segN) && mN.length > segN.length;
+            });
+            if (!whole) continue;
+            const dropped = normMsg(whole).split(" ").length - segN.split(" ").length;
+            if (dropped >= 4) {
+              problems.push(
+                `the quote "${seg.slice(0, 60)}…" stops partway through what they ` +
+                  `typed — they went on "…${normMsg(whole).slice(segN.length).trim().slice(0, 60)}". ` +
+                  `Quote the whole message, or quote a different one`,
+              );
+              break;
+            }
+          }
         }
       }
 
