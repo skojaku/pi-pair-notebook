@@ -5037,6 +5037,11 @@ export default function (pi: ExtensionAPI) {
         appealRuling = refereeWaiver!.ruling;
         if (appealRuling !== "next_chapter") refereeWaiver = null;
       }
+      // Read BEFORE the reset on the next line, which is four lines above the
+      // row that logs it. Taken after, the field is 0 on every checkpoint ever
+      // closed — which is worse than not having it: a grader reads "0 turns"
+      // beside "0 hints" and concludes the student needed neither.
+      const turnsTaken = turnsInCheckpoint;
       turnsInCheckpoint = 0; // a closed checkpoint is not a stuck one
       const logged = appendLog({
         type: "checkpoint",
@@ -5057,7 +5062,7 @@ export default function (pi: ExtensionAPI) {
         // see what happened, and today the row gives them nothing to see it
         // with. Hints are never held against the student; a record that
         // undercounts them is what damages this.
-        turns_in_checkpoint: turnsInCheckpoint,
+        turns_in_checkpoint: turnsTaken,
         notes: String(params.notes ?? ""),
         student_said_verbatim: said,
         ...(picked.length > 0 ? { student_picked: picked } : {}),
