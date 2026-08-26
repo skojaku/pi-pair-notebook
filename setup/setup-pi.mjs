@@ -246,6 +246,14 @@ https://github.com/sk-classroom/advanced-topics-in-network-science-mini-proj-eul
                    └────────────── owner ──────────────┘ └──────────── repo ────────────────┘
 \`\`\`
 
+## How to answer
+
+Write in full sentences. This is the first agent many of these students have
+used, and clipped notes — "Need usernames. Who add?" — read as an error, not a
+question. Name the repository back so they can see you understood which one,
+say what you are about to do, and after it works say what happens next. Three
+short sentences is plenty; a wall of text is not wanted either.
+
 ## Ask before you invite
 
 Adding a collaborator sends a real invitation to a real person, so confirm the
