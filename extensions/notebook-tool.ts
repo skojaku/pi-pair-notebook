@@ -1983,6 +1983,30 @@ function appendLog(entry: Record<string, unknown>): boolean {
  * paraphrase. Returns what they typed since the previous checkpoint.
  */
 let studentSaidMark = 0;
+/**
+ * WHERE the previous checkpoint closed, as a branch ENTRY ID.
+ *
+ * The mark above counts filtered student messages. That is enough to say
+ * "since the last close" and nothing at all about the TUTOR's turns in
+ * between — so a checkpoint's note quoted everything typed since the PREVIOUS
+ * one closed, including turns spoken before its own first question existed. A
+ * live m02-small-world session put "yeah a little demo would be cool!" and
+ * "yes ready!" — chapter 1's detour reply and its closing pace answer — into
+ * cp2_distance's note, and "hello? are you still there?", a nudge typed into
+ * a stalled terminal, into cp3_average's. cp3_global_clustering's note was
+ * clean in the same session because nothing intervened there, which is what
+ * proves this is the window boundary and not a filtering gap. See
+ * preQuestionCount.
+ *
+ * An id and not an index. getBranch() walks the parent chain from the current
+ * leaf, so a rewind or a re-branch hands back a different path, and a number
+ * we stored would point at a different turn — in the worst case one LATER
+ * than the real boundary, which is the one direction this file cannot afford:
+ * it would drop the student's own answer out of their own note. An id that is
+ * no longer on the branch is simply not found, and the window stands as it is
+ * today.
+ */
+let closedAtEntryId: string | null = null;
 // Every pi.sendMessage injection lands in the transcript with role "user".
 // Anything added here MUST start with one of these prefixes, or it is filed
 // as the student's own words and quoted back at them in the graded record.
@@ -2028,27 +2052,51 @@ function scriptProse(): Set<string> {
   return set;
 }
 
-function allStudentMessages(ctx: any): string[] {
-  const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
-  const out: string[] = [];
-  const prose = scriptProse();
-  for (const e of entries) {
-    if (e?.type !== "message" || e?.message?.role !== "user") continue;
-    const c = e.message.content;
-    const text =
-      typeof c === "string"
+/**
+ * The spoken text of a message's content. TEXT parts only: a reasoning trace
+ * says "the user wants…" as a matter of course and is not anybody speaking to
+ * anybody, and a tool_use block is not speech — the same rule message_update
+ * and tutorAwaitingAnswer already apply, each in its own copy of this.
+ */
+function partsText(c: any): string {
+  return (
+    typeof c === "string"
+      ? c
+      : Array.isArray(c)
         ? c
-        : Array.isArray(c)
-          ? c
-              .filter((p: any) => p?.type === "text" && typeof p.text === "string")
-              .map((p: any) => p.text)
-              .join("\n")
-          : "";
-    const s = text.trim();
+            .filter((p: any) => p?.type === "text" && typeof p.text === "string")
+            .map((p: any) => p.text)
+            .join("\n")
+        : ""
+  ).trim();
+}
+
+/**
+ * The student's own turns, each with WHERE in the branch it sits.
+ *
+ * The position is what gives the capture window a second edge instead of
+ * being a tail — see preQuestionCount. Carried here rather than recomputed by
+ * a second walk with a second copy of the INJECTED_PREFIX / scriptProse
+ * rules: two guards reading the same transcript and disagreeing about what
+ * counts is how a `_photo` cell holding no upload came to be refused for
+ * having no photo in it.
+ */
+function allStudentTurns(ctx: any): { text: string; at: number }[] {
+  const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+  const out: { text: string; at: number }[] = [];
+  const prose = scriptProse();
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e?.type !== "message" || e?.message?.role !== "user") continue;
+    const s = partsText(e.message.content);
     if (!s || INJECTED_PREFIX.test(s) || prose.has(s)) continue;
-    out.push(s);
+    out.push({ text: s, at: i });
   }
   return out;
+}
+
+function allStudentMessages(ctx: any): string[] {
+  return allStudentTurns(ctx).map((t) => t.text);
 }
 
 /**
@@ -2246,7 +2294,14 @@ function studentSaidSince(ctx: any, commit = true): string[] {
   try {
     const all = allStudentMessages(ctx);
     const fresh = all.slice(studentSaidMark);
-    if (commit) studentSaidMark = all.length;
+    if (commit) {
+      studentSaidMark = all.length;
+      // The two marks advance in the SAME statement, deliberately. A second
+      // mark that moves somewhere else is how every capture fault in this
+      // file begins: one of the two is always the one that got missed.
+      const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+      closedAtEntryId = entries.length ? (entries[entries.length - 1]?.id ?? null) : null;
+    }
     return fresh;
   } catch {
     return [];
@@ -2524,6 +2579,83 @@ function scriptedQuestionCount(cpId: string): number {
   return (checkpointBlock(cpId, "ask").match(/^\s*\d+\.\s/gm) ?? []).length;
 }
 
+/**
+ * The checkpoint's `reveal_after` block, or "" when its script has none.
+ *
+ * cp0_welcome carries none on purpose — ch1's own comment says "No hints and
+ * no reveal_after, deliberately: there is no question here to hint toward" —
+ * and its `ask` orders the tutor to greet and close in one breath. A silence
+ * guard firing there would be refusing the script. Read from the script and
+ * not from a list of ids, because cp1 DOES have one in both modules
+ * (cp1_milgram, cp1_routing, cp1_bridges), and a hardcoded cp0/cp1 exemption
+ * would have switched the guard off on two checkpoints that need it. An id
+ * the script does not know returns "" as well, which switches the guard off
+ * rather than guessing — the direction every gate in this file fails.
+ */
+function scriptedReveal(cpId: string): string {
+  const r = checkpointBlock(cpId, "reveal_after").trim();
+  return /^none$/i.test(r) ? "" : r;
+}
+
+/**
+ * Has the tutor SAID anything since the student last typed?
+ *
+ * checkpoint_done opens the "Where to next?" picker, and a picker under a
+ * silent close is everything the student gets for a right answer. In one live
+ * m02 session it happened three times: at cp2_diameter the pane went from
+ * their correct answer straight to "Writing that into your notebook…" and the
+ * dialog — the tool call sat in an assistant message with no text block in it
+ * at all, so the reveal that was the payoff for that answer was never spoken.
+ * cp3_clustering went the same way, and the turn after it came back
+ * completely empty, so the terminal sat dead until the student typed "hello?
+ * are you still there?" — which then landed in the next checkpoint's note as
+ * their own worked answer. AGENTS.md has forbidden this in prose for as long
+ * as there has been a reveal; a prohibition in prose is the weaker fix.
+ *
+ * The window is "since they last typed", not "in this message". A tutor that
+ * gives the reveal and then runs one more cell before closing has still given
+ * it, and refusing that shape would be refusing honest work. What must never
+ * happen is a beat with the student's words at one end and a dialog at the
+ * other and nothing in between.
+ *
+ * The tutor's own message is already in the branch when one of its tools runs
+ * — message_end persists it before the tool batch executes — which is the
+ * same fact tutorAwaitingAnswer above depends on to catch a question asked in
+ * this very breath.
+ *
+ * Boundaries are the student's typed turns and this extension's own injected
+ * briefs. An injection persists as `type: "custom_message"` with its content
+ * at entry level, so the readers above never see one; here it counts, because
+ * speech owed after a fresh brief is speech owed now. A tool result is not a
+ * boundary — role "toolResult" is the notebook answering, not anybody
+ * speaking. A tool-only assistant message is not the tutor speaking either;
+ * it is exactly what the three silent closes looked like.
+ *
+ * A walk that reaches the top without finding either end, or a transcript we
+ * cannot read: true. Nothing here blocks a close on a guess.
+ */
+function tutorSpokeSinceStudent(ctx: any): boolean {
+  try {
+    const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e?.type === "custom_message") {
+        if (partsText(e.content)) return false;
+        continue;
+      }
+      if (e?.type !== "message") continue;
+      const role = e?.message?.role;
+      if (role !== "user" && role !== "assistant") continue;
+      const text = partsText(e.message.content);
+      if (!text) continue;
+      return role === "assistant";
+    }
+  } catch {
+    /* a transcript we cannot read never blocks a close */
+  }
+  return true;
+}
+
 /** The «…» markers of a note skeleton, in order. */
 function slotMarkers(skeleton: string): string[] {
   return skeleton.match(/«[^»]*»/g) ?? [];
@@ -2597,6 +2729,107 @@ function isFillerMessage(m: string): boolean {
  * Cleared when the checkpoint that follows them closes.
  */
 const detourAsked = new Set<string>();
+
+/**
+ * Injections that end one chapter's conversation and begin the next. Both are
+ * written by this file (chapterScriptMessage, and the divider beside it), so
+ * this holds for m01, m02 and anything authored later. customType FIRST and
+ * the text prefix second: the prefix test in INJECTED_PREFIX is the one that
+ * has already failed once, when something between sendMessage and getBranch
+ * re-wrapped a message and lost it.
+ */
+const CHAPTER_BOUNDARY_TYPES = new Set(["chapter-script", "chapter-divider"]);
+
+/**
+ * How many of the messages studentSaidSince just handed back were typed
+ * BEFORE the tutor said its first word at this checkpoint. 0 means "do not
+ * narrow anything", and is the answer to every question this cannot settle.
+ *
+ * The capture window has only ever had one edge. It opens where the PREVIOUS
+ * checkpoint closed — studentSaidMark advances in checkpoint_done and nowhere
+ * else — so everything typed in the gap before the next question was ever put
+ * is filed as the next checkpoint's worked answer. A live m02 session quoted
+ * chapter 1's "yeah a little demo would be cool!" and "yes ready!" inside
+ * cp2_distance's note, and "hello? are you still there?" — typed into a
+ * terminal a silent turn had left dead — inside cp3_average's.
+ *
+ * No content test can reach that, and ACK_WORDS must not be asked to try. All
+ * three are real sentences that mean what they say; what makes them wrong is
+ * WHEN they were said. Catching them by vocabulary needs "demo", "hello",
+ * "still", "there" — and the note on ACK_WORDS above already records `this` /
+ * `that` / `one` being added and deleting half of a real answer, and `yes`
+ * being held out on purpose because it can BE an answer.
+ *
+ * Two boundaries, later one wins:
+ *
+ *   B1, the chapter boundary. Nothing typed before this chapter's script
+ *       arrived can answer this chapter's first question. This is the one
+ *       that catches the two chapter-1 turns in cp2_distance's note.
+ *
+ *   B2, the tutor's first SPEECH after that. This is the one that catches the
+ *       stall nudge: the assistant's turn between cp3_clustering closing and
+ *       cp3_average being asked was literally empty, so it is not speech and
+ *       not a candidate.
+ *
+ * "This checkpoint's first question" is deliberately defined as the tutor's
+ * first SPEECH, not its first interrogative sentence, and it is deliberately
+ * not matched against the script's `ask` block or against the logged
+ * `question`. Both of those can anchor LATE, and a late anchor drops the
+ * student's answer, which is worse than the bug: cp3_clustering asks four
+ * numbered questions in four separate turns, and anchoring on the one the
+ * tutor logged would take three real answers out of the keepsake. Anchoring
+ * on the FIRST spoken turn cannot land after any of a checkpoint's own
+ * questions. It errs early by construction — a bridge sentence, a tool
+ * preamble, a late reveal all anchor before the real question — and the extra
+ * turns that lets through are exactly the residue ACK_WORDS + isFillerMessage
+ * were built for. The two defences split the work; neither gives ground.
+ */
+function preQuestionCount(ctx: any): number {
+  try {
+    const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+    if (entries.length === 0) return 0;
+    let floor = -1;
+    if (closedAtEntryId !== null) {
+      floor = entries.findIndex((e: any) => e?.id === closedAtEntryId);
+      // The close is not on this branch any more (a rewind, a re-branch). We
+      // no longer know where the window starts, so we do not move it.
+      if (floor < 0) return 0;
+    }
+    // B1 — the last chapter boundary, if one is more recent than the close.
+    for (let i = entries.length - 1; i > floor; i--) {
+      const e = entries[i];
+      const ct = String(e?.customType ?? e?.message?.customType ?? "");
+      const text =
+        e?.type === "custom_message" ? partsText(e.content) : partsText(e?.message?.content);
+      if (CHAPTER_BOUNDARY_TYPES.has(ct) || /^(CHAPTER SCRIPT|── Chapter )/.test(text)) {
+        floor = i;
+        break;
+      }
+    }
+    // B2 — the tutor's first speech after that.
+    let anchor = -1;
+    for (let i = floor + 1; i < entries.length; i++) {
+      const e = entries[i];
+      if (e?.type !== "message" || e?.message?.role !== "assistant") continue;
+      if (partsText(e.message.content)) {
+        anchor = i;
+        break;
+      }
+    }
+    // The tutor has not spoken since the close. Then this checkpoint was never
+    // asked, there is no start to move the window to, and nothing is narrowed.
+    if (anchor < 0) return 0;
+    const turns = allStudentTurns(ctx).slice(studentSaidMark);
+    const cut = turns.filter((t) => t.at < anchor).length;
+    // Never the whole window. If nothing they typed lands after the tutor's
+    // first word, the anchor is wrong — and quoting too much is what this file
+    // does today, while quoting nothing puts the MODEL's wording in the note.
+    return cut >= turns.length ? 0 : cut;
+  } catch {
+    // a transcript we cannot read never narrows a window
+    return 0;
+  }
+}
 
 function fillSlots(skeleton: string, slots: string[], fallback: string): string {
   let i = 0;
@@ -4151,6 +4384,53 @@ export default function (pi: ExtensionAPI) {
           failed: false,
         });
       }
+      // ── The close with nothing said in front of it ──────────────────────
+      // AGENTS.md says "The reveal comes BEFORE checkpoint_done, always", with
+      // the live failure that motivated it written out underneath — and in one
+      // m02 session it was broken three times anyway. This is the same rule
+      // where the tool can see it.
+      //
+      // The tell needs no reading of meaning: has the tutor said ANYTHING
+      // since the student last typed? At cp2_diameter and cp3_clustering the
+      // answer was no — the checkpoint_done call sat in an assistant message
+      // carrying no text block, so the student went from their own answer to
+      // "Where to next?" with not one word in between.
+      //
+      // Placed AFTER the build and photo gates on purpose. Those two send the
+      // tutor away to insert a template and ask for a page, and making it
+      // deliver a reveal before the figure the reveal points at is backwards.
+      // The price is a blind spot — a tutor that speaks only while fixing a
+      // missing build makes this go quiet — and it costs nothing on the three
+      // rows that motivated it: two are `build: none`, and the third's build
+      // was already in the notebook.
+      //
+      // Once, like the hanging guard above, and with the same escape, which
+      // goes FIRST here: this guard's one realistic false positive is a tutor
+      // that already gave the reveal and had the student react to it since,
+      // and a model reading top-down would otherwise say the reveal twice.
+      // A guard that will not let go is worse than the fault it catches.
+      const revealDue = !!scriptedReveal(baseCheckpointId(id));
+      const spokeSince = revealDue ? tutorSpokeSinceStudent(ctx) : true;
+      const revealStrikes = slotDriftWarned.get(`${id}:reveal`) ?? 0;
+      if (revealDue && !spokeSince && revealStrikes < 1 && !refereeWaiverActive()) {
+        slotDriftWarned.set(`${id}:reveal`, 1);
+        return toResult({
+          out:
+            `NOT LOGGED — you have said nothing to the student since they last typed, ` +
+            `and this checkpoint has a reveal_after.\n` +
+            `If you already gave that reveal and I have this wrong, call checkpoint_done ` +
+            `again right now — it will log, and you need not repeat yourself or say ` +
+            `anything first.\n` +
+            `Otherwise: closing here drops the "Where to next?" picker straight under ` +
+            `their answer, so they get a dialog where the payoff should be — and on a ` +
+            `short terminal that is the last they see of it. A live run did exactly this ` +
+            `three times in one session. SPEAK FIRST, in plain text, in this turn: one ` +
+            `specific line about what THEY said, then this checkpoint's reveal_after in ` +
+            `short spoken beats — your own words, no headings, no $math$ read aloud. ` +
+            `THEN call checkpoint_done again.`,
+          failed: false,
+        });
+      }
       // Peek, don't consume: a refusal below must leave the transcript mark
       // where it was, or the retry would log an empty student_said_verbatim.
       const said = studentSaidSince(ctx, false);
@@ -4192,14 +4472,52 @@ export default function (pi: ExtensionAPI) {
       // souvenir for, and pure acknowledgement, are dropped — unless the
       // message IS the answer the tutor logged, which rescues a one-word
       // "right" that happens to look like filler.
-      const quotedFrom: number[] = [];
-      const answerish = said.filter((m, i) => {
-        const isResponse =
-          normMsg(m) === normMsg(response) || bigramDice(m, response) >= 0.6;
-        const keep = isResponse || (!detourAsked.has(normMsg(m)) && !isFillerMessage(m));
-        if (keep) quotedFrom.push(i + 1);
-        return keep;
-      });
+      // ── The other edge of the window ────────────────────────────────────
+      // `said` opens where the PREVIOUS checkpoint closed, which is not where
+      // this one began, so it also holds whatever they typed in the gap
+      // before this checkpoint's first question was ever put: a "yes ready!"
+      // to a pace question at a chapter close, a "hello? are you still
+      // there?" into a stalled terminal. Those were their words and they were
+      // not an answer to a question that did not yet exist, and a live m02
+      // session printed all three inside the note cells of cp2_distance and
+      // cp3_average as the student's worked answer.
+      //
+      // preQuestionCount narrows ONLY this — which of their messages the note
+      // CELL quotes. `said`, `pool`, student_said_verbatim, snapToTranscript,
+      // the said.length gates and the late-close count below are untouched,
+      // so nothing that already refuses a record can begin refusing a
+      // different set, and every word they typed is still on the graded row.
+      // note_skipped_msgs below already numbers what the note passed over.
+      const preAsk = preQuestionCount(ctx);
+      const quoteSet = (cut: number) => {
+        const from: number[] = [];
+        const keep = said.filter((m, i) => {
+          const isResponse =
+            normMsg(m) === normMsg(response) || bigramDice(m, response) >= 0.6;
+          // The BOUNDARY decides what to drop; content may only ever RESCUE.
+          // That asymmetry is the whole difference between this and growing
+          // ACK_WORDS, which has twice deleted real answers from a graded
+          // artifact: a word list decides on its own and gets "yes" wrong,
+          // while nothing is dropped here that the timeline had not already
+          // placed before the tutor spoke — and a figure, or the very message
+          // the tutor logged as the answer, pulls it straight back in. A
+          // student who volunteers the answer before being asked keeps it.
+          const beforeQuestion =
+            i < cut && !isResponse && !slotTokens(m).some(isFigure);
+          const k =
+            isResponse ||
+            (!beforeQuestion && !detourAsked.has(normMsg(m)) && !isFillerMessage(m));
+          if (k) from.push(i + 1);
+          return k;
+        });
+        return { keep, from };
+      };
+      // Fail open, and fail to what this file already does. If the cut leaves
+      // the note with nothing of theirs to quote, verbatimFill falls back to
+      // student_response — the MODEL's wording in the keepsake, which is what
+      // every check on this page exists to prevent. Quote too much instead.
+      const noteCut = preAsk > 0 && quoteSet(preAsk).keep.length === 0 ? 0 : preAsk;
+      const { keep: answerish, from: quotedFrom } = quoteSet(noteCut);
       const verbatimFill = answerish.length
         ? answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ")
         : response;
@@ -4642,6 +4960,13 @@ export default function (pi: ExtensionAPI) {
         ...(picked.length > 0 ? { student_picked: picked } : {}),
         ...(responseSnappedFrom ? { response_retyped_as: responseSnappedFrom } : {}),
         ...(photoMissing ? { photo_missing: true } : {}),
+        // The guard above gives up after one refusal and logs anyway. It has
+        // to — but the build gate taught this file that a gate which gives up
+        // silently leaves a damaged row byte-identical to an honest one. Says
+        // only what is checkable: nothing was spoken between their last words
+        // and this close. A reveal given before their last message is not
+        // visible from here, and this does not claim otherwise.
+        ...(revealDue && !spokeSince ? { closed_without_speaking: true } : {}),
         // The build guard gives up after two refusals and logs anyway — the
         // right call, since a guard that can strand a student is worse than
         // the fault it catches. But it left no mark, so a row for a checkpoint
@@ -4654,6 +4979,14 @@ export default function (pi: ExtensionAPI) {
         ...(quotesSnapped.length ? { slot_quotes_repaired: quotesSnapped } : {}),
         ...(quotesMsgs.length ? { note_quotes_msgs: quotesMsgs } : {}),
         ...(skippedMsgs.length ? { note_skipped_msgs: skippedMsgs } : {}),
+        // Where this checkpoint's own questioning starts in `said`. Anything
+        // before it was typed before there was a question here, and is
+        // SKIPPED by the note, never deleted: it is still in
+        // student_said_verbatim above and note_skipped_msgs already numbers
+        // it. RECORDED, not enforced — a grader who wonders why message 1 is
+        // not in the note should not have to guess whether a filter or the
+        // timeline did it.
+        ...(noteCut > 0 ? { note_window_from_msg: noteCut + 1 } : {}),
         ...(figuresDropped.length ? { figures_not_quoted: figuresDropped } : {}),
         ...(problems.length > 0 ? { verbatim_drift: problems } : {}),
       });
@@ -6465,7 +6798,13 @@ export default function (pi: ExtensionAPI) {
     triviaTimer = setInterval(() => showTrivia(ctx), 12_000);
     (triviaTimer as any).unref?.(); // never keep the process alive (print mode)
   });
-  pi.on("turn_end", async () => {
+  // Consecutive turns that came back with nothing in them at all. Reset by
+  // any turn that produced words or a tool call — see the bottom of turn_end.
+  let emptyTurns = 0;
+  pi.on("turn_end", async (event: any) => {
+    // Read before runPendingCompaction() nulls it: the stall nudge at the
+    // bottom must not fire into a chapter handoff.
+    const wasHandingOff = !!pendingCompaction;
     if (triviaTimer) {
       clearInterval(triviaTimer);
       triviaTimer = null;
@@ -6511,6 +6850,70 @@ export default function (pi: ExtensionAPI) {
       } catch {
         /* a nudge that cannot be sent is not worth a broken turn */
       }
+    }
+
+    // ── The turn that came back empty ─────────────────────────────────────
+    // Not every silence is a choice the model made. In the same session that
+    // lost three reveals, the turn after cp3_clustering's close came back with
+    // `content: []` and stopReason "stop": no words, no tool call, nothing to
+    // render. The terminal stopped, and stayed stopped, until the student
+    // typed "hello? are you still there?" into it — and that nudge then landed
+    // in cp3_average's note as their own worked answer.
+    //
+    // A completion with nothing in it is not a judgement call, so unlike
+    // everything else in this file it can be caught from outside the model:
+    // turn_end hands us the message. Poke it once and let it speak. A
+    // tool-calling turn ends "toolUse", and an aborted or errored one ends
+    // "aborted"/"error", so this can never double-fire with the runaway
+    // guard's own abort-and-resend.
+    //
+    // Consecutive stalls are counted so this can never be the thing that spins
+    // it: two nudges, then stop. After that the student's own keystroke
+    // restarts the session — which is exactly what happens today with no nudge
+    // at all, so the cap costs them nothing they were not already going to get.
+    //
+    // Not while a chapter handoff is armed. chapter_done ends its turn on a
+    // bridge sentence and compaction fires right here; a message injected into
+    // that window is the "Error: This operation was aborted" the comment above
+    // exists to prevent, and that path already has its own 30s floor.
+    //
+    // Nothing is said to the STUDENT. A stall is toolkit machinery, and a
+    // beginner reading "your tutor returned an empty response" learns only
+    // that the thing they are graded in is broken.
+    const parts = Array.isArray(event?.message?.content) ? event.message.content : [];
+    const stalled =
+      event?.message?.role === "assistant" &&
+      event.message.stopReason === "stop" &&
+      !parts.some(
+        (p: any) =>
+          p?.type === "toolCall" || (p?.type === "text" && String(p.text ?? "").trim()),
+      );
+    if (!stalled) {
+      emptyTurns = 0;
+      return;
+    }
+    emptyTurns += 1;
+    if (wasHandingOff || emptyTurns > 2) return;
+    try {
+      pi.sendMessage(
+        {
+          customType: "empty-turn",
+          content:
+            `NOTE (invisible to the student): your last turn came back completely ` +
+            `empty — no words and no tool call — so their screen has been sitting ` +
+            `silent with nothing on it for them to answer. They cannot tell that apart ` +
+            `from you thinking, and in a live run a student waited on exactly this ` +
+            `until they typed "hello? are you still there?".\n` +
+            `Say the next thing you owe them NOW, in plain text. If a checkpoint's ` +
+            `reveal is still unspoken, give it in short beats; otherwise ask the ` +
+            `question you were on, in one short line. Do not apologise, do not mention ` +
+            `this note, and do not start the chapter over.`,
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    } catch {
+      /* a nudge that cannot be sent is not worth a broken turn */
     }
   });
 }

@@ -150,6 +150,8 @@ def main():
                 "response_retyped_as",
                 "slot_quotes_repaired",
                 "note_skipped_msgs",
+                "note_window_from_msg",
+                "closed_without_speaking",
                 "figures_not_quoted",
                 "closed_by_referee",
             )
