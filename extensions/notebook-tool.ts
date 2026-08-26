@@ -4892,6 +4892,13 @@ export default function (pi: ExtensionAPI) {
           for (const seg of quoted.split("·").map((s) => s.trim().replace(/^"|"$/g, ""))) {
             const segN = normMsg(seg);
             if (segN.split(" ").length < 2) continue;
+            // A quote that IS one of their messages is right by definition,
+            // even when a later one opens with the same words. Students
+            // elaborate: "i think its 2", then "i think its 2 because they
+            // are neighbours on the ring". Without this, quoting the first
+            // one exactly and correctly is refused for being a truncation of
+            // the second. Verified against both shapes before shipping.
+            if (said.some((m) => normMsg(m) === segN)) continue;
             const whole = said.find((m) => {
               const mN = normMsg(m);
               return mN.startsWith(segN) && mN.length > segN.length;
