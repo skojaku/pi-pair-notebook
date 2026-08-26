@@ -5045,6 +5045,19 @@ export default function (pi: ExtensionAPI) {
         student_response: response,
         judgment: judgmentOut,
         hints_used: hintsOut,
+        // How long the two of them were actually on this checkpoint. Not a
+        // check and not a correction — a FACT, next to a number the model
+        // supplies from memory and has been seen to get wrong: a live run
+        // gave three separate guiding turns on one sub-question ("A to B —
+        // how many lines?", then "is there a line directly from A to B…",
+        // then "look at the rust dot in the middle…") and logged
+        // hints_used: 2. Nothing here overrides the model's count, because
+        // "was that turn a hint or a reaction?" is a judgement no counter can
+        // make. But a grader reading `hints_used: 0` beside eleven turns can
+        // see what happened, and today the row gives them nothing to see it
+        // with. Hints are never held against the student; a record that
+        // undercounts them is what damages this.
+        turns_in_checkpoint: turnsInCheckpoint,
         notes: String(params.notes ?? ""),
         student_said_verbatim: said,
         ...(picked.length > 0 ? { student_picked: picked } : {}),

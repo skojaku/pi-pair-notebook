@@ -151,6 +151,7 @@ def main():
                 "slot_quotes_repaired",
                 "note_skipped_msgs",
                 "note_window_from_msg",
+                "turns_in_checkpoint",
                 "closed_without_speaking",
                 "figures_not_quoted",
                 "closed_by_referee",
