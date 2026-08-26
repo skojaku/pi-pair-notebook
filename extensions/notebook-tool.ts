@@ -5642,8 +5642,11 @@ export default function (pi: ExtensionAPI) {
           // checkpoint. Recorded from THEIR question, not from the close, so
           // a detour taken in the middle of a checkpoint leaves the answers
           // they gave before it exactly where they are.
-          const qi = saidNow.findIndex((m) => normMsg(m) === normMsg(asked));
-          if (qi >= 0) detourSpans.push([qi, saidNow.length - 1]);
+          // bestIdx, not a fresh findIndex over the same text: a student who
+          // types the same words twice would match the FIRST of them, and the
+          // span would reach back over answers they had already given. It is
+          // already the position `asked` was taken from, and it is > -1 here.
+          detourSpans.push([bestIdx, saidNow.length - 1]);
           // Whatever the note leaves out, the souvenir says in full — and in
           // THEIR words. A live run logged the question with the student's
           // lead-in trimmed off ("Wait, quick question first —"), and the
