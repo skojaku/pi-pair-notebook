@@ -2731,6 +2731,29 @@ function isFillerMessage(m: string): boolean {
 const detourAsked = new Set<string>();
 
 /**
+ * The stretches of this checkpoint's window that belong to a DETOUR, as
+ * [first, last] indices into what studentSaidSince last handed back.
+ *
+ * `detourAsked` drops the question and nothing else, so the rest of the
+ * exchange stayed in the checkpoint's note. A live run put "yes please, that
+ * would help" — the student accepting an offered souvenir cell — into
+ * cp1_routing's note as their worked answer on the routing question, and it
+ * was the only note in that session with anything wrong in it, because it was
+ * the only checkpoint a detour sat in front of.
+ *
+ * A SPAN and not a new window start, which is the whole difference between
+ * this and the two shapes that had to be rejected. Detours happen INSIDE
+ * checkpoints — AGENTS.md builds the lesson around that — so anything that
+ * moved the window forward to the detour would take with it every answer the
+ * student had already given before asking their question. A span reaches from
+ * their question to the moment log_detour recorded it, and touches nothing on
+ * either side of that.
+ *
+ * Cleared with detourAsked, when the checkpoint closes.
+ */
+const detourSpans: [number, number][] = [];
+
+/**
  * Injections that end one chapter's conversation and begin the next. Both are
  * written by this file (chapterScriptMessage, and the divider beside it), so
  * this holds for m01, m02 and anything authored later. customType FIRST and
@@ -4171,8 +4194,62 @@ export default function (pi: ExtensionAPI) {
       { deliverAs: "followUp", triggerTurn: true },
     );
   });
-  pi.on("message_end", async () => {
+  // ── The breath before a drawing ─────────────────────────────────────────
+  // "Let me put both shapes up so we can see them side by side." "Let's put
+  // Alice's actual picture up." "I'll draw a new one." Every one of those went
+  // out immediately before a cell landed, in sessions run under an AGENTS.md
+  // whose longest passage is the ban on exactly this — and one of them came
+  // back near word-for-word as the failure that passage quotes. Prose was the
+  // fix twice and did not hold twice, so this is the same rule where the
+  // extension can see it.
+  //
+  // It cannot unsay the sentence: by the time a message ends it is on their
+  // screen. What it can do is stop the SECOND one, and in the run that
+  // motivated it there were two. Once per session, invisible, and never a
+  // refusal — a build is not worth blocking over a turn of phrase.
+  //
+  // Both halves must be true in the same message: a narration phrase AND a
+  // cell actually being inserted. "Let me know if that's unclear" is not this,
+  // and neither is a tutor saying "let's put that aside" with no tool call
+  // behind it.
+  const NARRATES_A_BUILD =
+    /\b(?:let me|let's|lets|i'?ll|i am going to|i'?m going to)\s+(?:\w+\s+){0,2}?(?:put|draw|add|build|show|render|sketch|set up|pop|drop)\b/i;
+  const BUILDS_A_CELL = new Set(["nb_add_cell", "nb_add_template", "nb_add_exercise"]);
+  let narrationNudged = false;
+  pi.on("message_end", async (event: any) => {
     runawayFired = false;
+    if (narrationNudged) return;
+    try {
+      const content = event?.message?.content;
+      if (event?.message?.role !== "assistant" || !Array.isArray(content)) return;
+      const spoke = content
+        .filter((p: any) => p?.type === "text" && typeof p.text === "string")
+        .map((p: any) => p.text)
+        .join("\n");
+      const builds = content.some(
+        (p: any) => p?.type === "toolCall" && BUILDS_A_CELL.has(String(p?.name ?? p?.toolName ?? "")),
+      );
+      if (!builds || !NARRATES_A_BUILD.test(spoke)) return;
+      narrationNudged = true;
+      pi.sendMessage(
+        {
+          customType: "narration-nudge",
+          content:
+            `NOTE (invisible to the student): you just told them you were about to ` +
+            `put something in the notebook, and then put it there. They can see the ` +
+            `cell arrive; the sentence in front of it only announces plumbing, and ` +
+            `AGENTS.md rules it out for that reason.\n` +
+            `From here on, when you build: either say what the picture is FOR — ` +
+            `"here are the two shapes side by side: which one has the third line?" — ` +
+            `or say nothing and let the cell speak. Never that you are about to make ` +
+            `one. Do not mention this note and do not apologise for the last one.`,
+          display: false,
+        },
+        { deliverAs: "nextTurn" },
+      );
+    } catch {
+      /* style is steered, never enforced: a nudge that fails costs nothing */
+    }
   });
 
   // Fixed-choice questions go through the ask_user_question tool
@@ -4489,11 +4566,15 @@ export default function (pi: ExtensionAPI) {
       // different set, and every word they typed is still on the graded row.
       // note_skipped_msgs below already numbers what the note passed over.
       const preAsk = preQuestionCount(ctx);
-      const quoteSet = (cut: number) => {
+      const quoteSet = (cut: number, dropDetours: boolean) => {
         const from: number[] = [];
         const keep = said.filter((m, i) => {
           const isResponse =
             normMsg(m) === normMsg(response) || bigramDice(m, response) >= 0.6;
+          // Inside a detour the student was answering the tutor's aside, not
+          // this checkpoint. detourAsked already drops their question; this
+          // drops the rest of the exchange around it.
+          const inDetour = dropDetours && detourSpans.some(([a, b]) => i >= a && i <= b);
           // The BOUNDARY decides what to drop; content may only ever RESCUE.
           // That asymmetry is the whole difference between this and growing
           // ACK_WORDS, which has twice deleted real answers from a graded
@@ -4502,22 +4583,27 @@ export default function (pi: ExtensionAPI) {
           // placed before the tutor spoke — and a figure, or the very message
           // the tutor logged as the answer, pulls it straight back in. A
           // student who volunteers the answer before being asked keeps it.
-          const beforeQuestion =
-            i < cut && !isResponse && !slotTokens(m).some(isFigure);
+          const elsewhere =
+            (i < cut || inDetour) && !isResponse && !slotTokens(m).some(isFigure);
           const k =
             isResponse ||
-            (!beforeQuestion && !detourAsked.has(normMsg(m)) && !isFillerMessage(m));
+            (!elsewhere && !detourAsked.has(normMsg(m)) && !isFillerMessage(m));
           if (k) from.push(i + 1);
           return k;
         });
         return { keep, from };
       };
-      // Fail open, and fail to what this file already does. If the cut leaves
-      // the note with nothing of theirs to quote, verbatimFill falls back to
-      // student_response — the MODEL's wording in the keepsake, which is what
-      // every check on this page exists to prevent. Quote too much instead.
-      const noteCut = preAsk > 0 && quoteSet(preAsk).keep.length === 0 ? 0 : preAsk;
-      const { keep: answerish, from: quotedFrom } = quoteSet(noteCut);
+      // Fail open, and fail to what this file already does. If a narrowing
+      // leaves the note with nothing of theirs to quote, verbatimFill falls
+      // back to student_response — the MODEL's wording in the keepsake, which
+      // is what every check on this page exists to prevent. So both
+      // narrowings give way, the newest one first, before that can happen.
+      // Quote too much instead.
+      let noteCut = preAsk;
+      let chosen = quoteSet(noteCut, true);
+      if (!chosen.keep.length && noteCut > 0) chosen = quoteSet((noteCut = 0), true);
+      if (!chosen.keep.length && detourSpans.length) chosen = quoteSet(noteCut, false);
+      const { keep: answerish, from: quotedFrom } = chosen;
       const verbatimFill = answerish.length
         ? answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ")
         : response;
@@ -4922,6 +5008,10 @@ export default function (pi: ExtensionAPI) {
       // The detour marks belong to the checkpoint just closed — the same
       // words typed again later are a fresh answer.
       detourAsked.clear();
+      // The spans are indices into the window that just closed. Left behind,
+      // they would point at whatever the NEXT checkpoint's window puts in
+      // those slots — the student's own answers.
+      detourSpans.length = 0;
 
       // A checkpoint that needed hints is `pass_with_hints`, whatever the
       // model typed. It logged plain `pass` with hints_used 2 in a live run —
@@ -5546,6 +5636,14 @@ export default function (pi: ExtensionAPI) {
           (bestScore >= 0.9 || (bestScore >= 0.6 && looksAsked))
         ) {
           detourAsked.add(normMsg(asked));
+          // The question is not the whole detour. Everything from it to here
+          // is the aside — the tutor's answer, the offer of a souvenir, their
+          // "yes please, that would help" — and none of it answers the
+          // checkpoint. Recorded from THEIR question, not from the close, so
+          // a detour taken in the middle of a checkpoint leaves the answers
+          // they gave before it exactly where they are.
+          const qi = saidNow.findIndex((m) => normMsg(m) === normMsg(asked));
+          if (qi >= 0) detourSpans.push([qi, saidNow.length - 1]);
           // Whatever the note leaves out, the souvenir says in full — and in
           // THEIR words. A live run logged the question with the student's
           // lead-in trimmed off ("Wait, quick question first —"), and the
