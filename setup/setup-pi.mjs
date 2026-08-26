@@ -212,6 +212,142 @@ try {
   line(`     start instead. Answer ${c.b}Trust${c.off} (the first option).`);
 }
 
+// --- the mini-project skill --------------------------------------------------
+// A group assignment has a step the Pair Notebook does not: one person accepts
+// and then adds the other two. Students do that from a repository URL, and the
+// assistant can do it for them — but only if it knows the procedure, which is
+// what a skill is.
+//
+// It goes in the GLOBAL skills directory, not the mini-project's `.pi/skills/`.
+// A `.pi/` folder in the assignment would work and would also open the trust
+// dialog described above, in a repository no setup script ever runs in — so
+// the answer would be asked of a student with no way to know it, and "Do not
+// trust" is remembered. Global costs nothing and reaches every folder.
+say("Adding the mini-project skill to ~/.pi/agent/skills");
+const SKILL_DIR = path.join(os.homedir(), ".pi", "agent", "skills", "classroom-teammates");
+const SKILL_MD = `---
+name: classroom-teammates
+description: Add teammates to a Classroom 50 group assignment repository, or clone one, when the student gives you its GitHub URL or asks to add someone to their mini-project. Use for "add my teammate", "invite <username>", "get my copy of the mini-project", "who is on my repo". Not for the Pair Notebook, which is an individual assignment.
+compatibility: Needs the GitHub CLI (\`gh\`) signed in. The \`gh student\` extension is used when present and the REST API otherwise.
+---
+
+# Adding teammates to a mini-project repository
+
+The mini-project is a **group** assignment. One person accepts, which makes one
+private repository, and that person adds the others to it. It is marked once,
+in that repository, and every collaborator on it gets the same score.
+
+The student will usually paste the repository's web page URL. Take
+\`<owner>/<repo>\` out of it — everything after \`github.com/\`, minus any trailing
+\`.git\`, \`/tree/...\` or query string.
+
+\`\`\`
+https://github.com/sk-classroom/advanced-topics-in-network-science-mini-proj-euler-tour-alice
+                   └────────────── owner ──────────────┘ └──────────── repo ────────────────┘
+\`\`\`
+
+## Ask before you invite
+
+Adding a collaborator sends a real invitation to a real person, so confirm the
+usernames first. Say which repository you are adding them to, and list them
+back. Do not guess a username from a first name — ask.
+
+Up to **three** people total, the founder included. If the student names a
+fourth, say so rather than trying it.
+
+## Adding them
+
+One command per teammate:
+
+\`\`\`bash
+gh student invite <owner>/<repo> <their-github-username>
+\`\`\`
+
+On success it prints one line:
+
+\`\`\`
+invited kaito with push permission
+\`\`\`
+
+If \`gh student\` is not installed, the same thing through the API:
+
+\`\`\`bash
+gh api -X PUT repos/<owner>/<repo>/collaborators/<username> -f permission=push
+\`\`\`
+
+## When it does not work
+
+Report what actually happened. Do not retry a failure silently, and do not
+claim a teammate was added when the command did not say so.
+
+| What you see | What it means | What to tell the student |
+|---|---|---|
+| \`Not Found\` / 404 | The repository name is wrong, or the student is not an admin on it | Check the URL. Only the person who accepted can add people. |
+| \`Bad credentials\` / 401 | \`gh\` is not signed in | Run \`gh auth login\`. |
+| Refused for group size | The team is already at three | Say who is already on it — see below. |
+| \`already exists\` / no-op | They were invited before | Nothing to do; the invitation is waiting for them. |
+
+An invitation is **not** membership. The teammate has to accept it on GitHub
+before they can push, and if they never joined the course organisation at all,
+nothing reaches them. Say that once, after a successful invite — it is the most
+common reason a teammate cannot push on the day.
+
+## Who is on it now
+
+\`\`\`bash
+gh api repos/<owner>/<repo>/collaborators --jq '.[] | .login + "  " + .role_name'
+\`\`\`
+
+Pending invitations are separate, and are the usual explanation for "I invited
+them but they are not there":
+
+\`\`\`bash
+gh api repos/<owner>/<repo>/invitations --jq '.[] | .invitee.login + "  (pending)"'
+\`\`\`
+
+## Getting your copy
+
+If the student wants the repository on their machine rather than a teammate on
+it, clone it into the current folder and say where it landed:
+
+\`\`\`bash
+git clone <the URL they gave you>
+\`\`\`
+
+Every member of the team clones the same repository — there is only one.
+
+## Handing work in
+
+Pushing is the hand-in; there is no submit button. Pull first, because the
+other two have been working:
+
+\`\`\`bash
+git pull --rebase
+git add -A && git commit -m "<what they did>" && git push
+\`\`\`
+
+Then tell them the commit you made. Marking starts on its own and writes the
+mark to a **release** on the repository a minute or two later — the Actions tab
+only shows that it ran.
+`;
+try {
+  fs.mkdirSync(SKILL_DIR, { recursive: true });
+  const target = path.join(SKILL_DIR, "SKILL.md");
+  const same = fs.existsSync(target) && fs.readFileSync(target, "utf8") === SKILL_MD;
+  if (same) {
+    ok("already up to date");
+  } else {
+    fs.writeFileSync(target, SKILL_MD);
+    ok("your assistant can add teammates and hand work in for you");
+  }
+} catch (e) {
+  // Never fatal: without it the assistant still works, it just has to be told
+  // the procedure each time instead of knowing it.
+  warn(`could not write the skill (${e.message}).`);
+  line("     Not a problem — your assistant still works, it just will not know");
+  line("     the mini-project's team steps without being told them.");
+}
+
 // --- what plain `pi` starts, outside a lesson --------------------------------
 // A module folder names its own defaultProvider/defaultModel, and pi's project
 // settings override the global ones (`.pi/settings.json` beats
