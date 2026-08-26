@@ -20,6 +20,7 @@
  * in the terminal and the tutor reads the values with nb_read.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,54 @@ import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** This file's directory. */
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// ── Health markers for the update channel ───────────────────────────────────
+// channel-update.ts moves this package's checkout to a newer tag and rolls it
+// back when the new one does not come up. These two markers are how it knows
+// which happened: `loaded` is written the moment this file's factory runs,
+// `healthy` only after a session_start that actually got a chapter on screen.
+//
+// Duplicated there rather than imported from there, deliberately: the two
+// files must share no code. A shared helper with a syntax error in it takes
+// down the toolkit AND the thing that repairs the toolkit, and nothing is
+// left on the student's machine that can undo the release.
+//
+// RUNNING_TAG is read at import, before any checkout can move it — so a
+// marker always names the code that actually ran, never the pin.
+const CHANNEL_MARKERS = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "pair-notebook-channel",
+  "markers",
+);
+const CHANNEL_MODULE_KEY = createHash("sha256")
+  .update(process.cwd())
+  .digest("hex")
+  .slice(0, 16);
+const RUNNING_TAG: string | null = (() => {
+  try {
+    const v = JSON.parse(
+      fs.readFileSync(path.join(EXT_DIR, "..", "package.json"), "utf-8"),
+    )?.version;
+    return v ? `v${v}` : null;
+  } catch {
+    return null;
+  }
+})();
+
+function markChannel(kind: "loaded" | "healthy"): void {
+  if (!RUNNING_TAG) return;
+  try {
+    fs.mkdirSync(CHANNEL_MARKERS, { recursive: true });
+    fs.writeFileSync(
+      path.join(CHANNEL_MARKERS, `${CHANNEL_MODULE_KEY}--${kind}--${RUNNING_TAG}`),
+      "",
+    );
+  } catch {
+    /* a marker we cannot write costs a rollback we did not need, never a lesson */
+  }
+}
 
 /** JSON string literals are valid Python string literals. */
 const py = (s: string) => JSON.stringify(s);
@@ -3110,21 +3159,19 @@ const MARIMO_CELL_RULES =
   "(it even draws self-loops) or matplotlib figure always looks better.";
 
 export default function (pi: ExtensionAPI) {
+  // First statement in the factory, before anything that could throw: this is
+  // what tells channel-update.ts that a newly checked-out tag imported at all.
+  markChannel("loaded");
   piRef = pi;
   // The notebook server, the student's copy of the notebook, and the browser
   // page all come up here — nothing outside this package launches anything.
   // Not awaited: uv's first sandbox build can take a minute, and the student's
   // first turn is a hello. runKernel waits when waiting actually matters.
-  void marimoUrl();
-  // The tutor talks; it does not run commands. Every notebook and log
-  // operation goes through the quiet nb_* tools, so a raw shell would only
-  // ever scroll past the student mid-lesson.
-  try {
-    const active: string[] = pi.getActiveTools?.() ?? [];
-    if (active.includes("bash")) pi.setActiveTools?.(active.filter((n) => n !== "bash"));
-  } catch {
-    /* an older pi without tool management: AGENTS.md still forbids it */
-  }
+  //
+  // The .catch is not decoration. There is no unhandledRejection handler in
+  // pi, and its uncaughtException handler exits 1 — so a rejected promise
+  // nobody is holding ends the student's session with a stack trace.
+  void marimoUrl().catch(() => {});
   // Guards against a checkpoint's build landing in the wrong place: if the
   // tutor starts building checkpoint B before closing checkpoint A with
   // checkpoint_done, A's note cell gets created LATE and lands after B's
@@ -3277,27 +3324,47 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     lastCtx = _ctx ?? lastCtx;
+    // The tutor talks; it does not run commands. Every notebook and log
+    // operation goes through the quiet nb_* tools, so a raw shell would only
+    // ever scroll past the student mid-lesson.
+    //
+    // Here and not in the factory. pi binds the tool-management methods to
+    // stubs that THROW for the whole of extension loading
+    // (dist/core/extensions/loader.js:133-152, "Action methods cannot be
+    // called during extension loading"), so the same block in the factory
+    // threw into its own catch every single time and the tutor kept bash on
+    // every student's machine. It read as working because the E2E harness
+    // passes --exclude-tools bash on the command line, which hid it under
+    // test — the one place it was never actually exercised.
+    try {
+      const active: string[] = pi.getActiveTools?.() ?? [];
+      if (active.includes("bash")) pi.setActiveTools?.(active.filter((n) => n !== "bash"));
+    } catch {
+      /* an older pi without tool management: AGENTS.md still forbids it */
+    }
     // Before anything else: is the tutor's own model reachable? A broken key
     // or a stale endpoint is otherwise discovered as an unexplained
     // "Connection error." on the student's first hello.
-    void preflightProvider(_ctx).then((problem) => {
-      if (!problem) return;
-      try {
-        // No ui.notify beside this: pi renders a notification as another
-        // "Error:" row, and the student is already looking at one they cannot
-        // read. One block, in plain words, last on the screen.
-        piRef?.sendMessage(
-          {
-            customType: "setup-help",
-            content: `⚠  Your tutor cannot reach the course server.\n\n${problem}`,
-            display: true,
-          },
-          { deliverAs: "followUp" },
-        );
-      } catch {
-        /* best effort — the student still gets pi's own error */
-      }
-    });
+    void preflightProvider(_ctx)
+      .then((problem) => {
+        if (!problem) return;
+        try {
+          // No ui.notify beside this: pi renders a notification as another
+          // "Error:" row, and the student is already looking at one they cannot
+          // read. One block, in plain words, last on the screen.
+          piRef?.sendMessage(
+            {
+              customType: "setup-help",
+              content: `⚠  Your tutor cannot reach the course server.\n\n${problem}`,
+              display: true,
+            },
+            { deliverAs: "followUp" },
+          );
+        } catch {
+          /* best effort — the student still gets pi's own error */
+        }
+      })
+      .catch(() => {});
     // ── Chapter start + resume brief ──────────────────────────────────────
     // Determine the current chapter (from progress or saved state), inject
     // its script, and — when previous progress exists — a resume brief that
@@ -3431,6 +3498,13 @@ export default function (pi: ExtensionAPI) {
         // the middle of a different chapter's cells (seen in production).
         scheduleChapterHeader(chapter, num, chapters.length);
       }
+      // Last statement inside the try: session_start got all the way through
+      // — the log was read, the chapter resolved, the script handed over —
+      // without throwing. That is the definition of "this tag came up" the
+      // channel rolls back on, so it must not move above the work. A marker
+      // written before the lesson exists would certify a broken release fifty
+      // times over.
+      markChannel("healthy");
     } catch {
       // chapter injection is best-effort; AGENTS.md tells the tutor how to cope
     }

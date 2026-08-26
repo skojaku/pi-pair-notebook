@@ -1,0 +1,183 @@
+# The gate in front of the update channel.
+#
+# channel.json reaches every student who has already started a module, so the
+# question this workflow answers is not "does the code look right" but "does
+# the tag we are about to point fifty people at actually start pi".
+#
+# It needs no secrets. The assertion is the `loaded` marker that
+# notebook-tool.ts writes in its factory: if the marker is on disk, the
+# extension imported and ran on a real pi. That works with no model configured,
+# which is what keeps the gateway key out of a public repository. The full
+# tutoring E2E, which does need the key and the real module content, runs in the
+# course repo.
+#
+# Promotion is the point. Students read channel.json from `release`, and only
+# this workflow writes that branch — so a tag cannot reach anyone until it has
+# been proved here. Protect `release` in repository settings, or the gate is a
+# habit rather than a gate.
+name: channel-guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only by default. Only `promote` gets write, and only it needs it —
+# `validate` and `boot` run on pull requests, and a same-repo PR branch would
+# otherwise hand a write-capable GITHUB_TOKEN to a job that runs code from the
+# branch under review.
+permissions:
+  contents: read
+
+concurrency:
+  group: channel-guard
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.guard.outputs.tags }}
+      frozen: ${{ steps.guard.outputs.frozen }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Tags resolve, tag and manifest agree, both extensions are listed and
+      # present, and the updater is not listed first. Also refuses a channel
+      # that walks students backwards — unless the commit says so.
+      #
+      # That escape hatch is not optional: rolling a tag BACK is the emergency
+      # path, and a guard that blocks it would hold every student on the broken
+      # release it was built to rescue them from. Put [allow-rollback] in the
+      # commit message you are already writing.
+      - name: Static checks
+        id: guard
+        run: |
+          extra=""
+          if git log -1 --pretty=%B | grep -qF "[allow-rollback]"; then
+            echo "commit opts into a rollback"
+            extra="--allow-rollback"
+          fi
+          node review/channel_guard.mjs --against release $extra
+
+      - name: Typecheck the extensions
+        run: |
+          npm install --no-save typescript@5
+          npx tsc --noEmit --skipLibCheck --module esnext --target es2022 \
+            --moduleResolution bundler --allowImportingTsExtensions \
+            extensions/channel-update.ts || \
+            echo "::warning::typecheck reported problems (peer types are not installed here)"
+
+  # Every tag the channel advertises has to start pi with the toolkit loaded.
+  # Exit code alone proves nothing: a manifest entry pointing at a missing file
+  # is dropped silently and pi still exits 0, so the extension can cease to
+  # exist without a single error line. Hence the marker.
+  boot:
+    needs: validate
+    if: needs.validate.outputs.tags != '[]' && needs.validate.outputs.tags != ''
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        tag: ${{ fromJSON(needs.validate.outputs.tags) }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install pi
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+      - name: Boot ${{ matrix.tag }}
+        shell: bash
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -u
+          root="$RUNNER_TEMP/bootcheck"
+          rm -rf "$root"; mkdir -p "$root/home" "$root/mod/.pi" "$root/mod/lesson"
+          cat > "$root/mod/.pi/settings.json" <<EOF
+          { "packages": ["git:github.com/skojaku/pi-pair-notebook@$TAG"] }
+          EOF
+          echo '{"module":"channel-bootcheck","version":"0.0.0","title":"boot","chapters":[]}' \
+            > "$root/mod/lesson/index.json"
+
+          cd "$root/mod"
+          # MARIMO_URL keeps the extension from spawning uv for a notebook
+          # server nobody will connect to. PAIR_NOTEBOOK_NO_UPDATE stops the
+          # thing under test from updating itself out from under the test.
+          HOME="$root/home" USERPROFILE="$root/home" \
+          MARIMO_URL=http://127.0.0.1:59999 PAIR_NOTEBOOK_NO_UPDATE=1 \
+            pi -p "hi" -a > boot.log 2>&1 &
+          pid=$!
+          # With no model configured pi loads everything and then waits, so a
+          # kill here is the expected ending. The verdict is the marker, never
+          # the exit code.
+          for _ in $(seq 1 90); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill -9 $pid 2>/dev/null || true
+
+          echo "--- boot.log ---"; tail -40 boot.log || true
+
+          if grep -q "Failed to load extension" boot.log; then
+            echo "::error::$TAG — an extension failed to load; this tag would exit 1 for every student"
+            grep "Failed to load extension" boot.log
+            exit 1
+          fi
+
+          markers="$root/home/.pi/agent/pair-notebook-channel/markers"
+          if ! ls "$markers" 2>/dev/null | grep -q -- "--loaded--$TAG"; then
+            echo "::error::$TAG — pi started but the toolkit never loaded (no marker). A missing manifest entry does this silently."
+            ls -la "$markers" 2>/dev/null || echo "(no marker directory at all)"
+            exit 1
+          fi
+          echo "✓ $TAG loaded on ${{ matrix.os }}"
+
+  # Only reached when every tag in the file booted on both platforms. This is
+  # the moment a tag becomes visible to students.
+  promote:
+    needs: [validate, boot]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.validate.result == 'success' &&
+      (needs.boot.result == 'success' || needs.boot.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish channel.json to release
+        run: |
+          set -eu
+          git config user.name "channel-guard"
+          git config user.email "noreply@github.com"
+
+          if git ls-remote --exit-code --heads origin release >/dev/null 2>&1; then
+            git fetch origin release
+            git checkout -B release origin/release
+          else
+            # `release` carries channel.json and nothing else. Branching it off
+            # main would publish the whole repository a second time and make
+            # "did channel.json change" impossible to see in its history.
+            git checkout --orphan release
+            git rm -rf --cached . >/dev/null 2>&1 || true
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          fi
+
+          git checkout "${GITHUB_SHA}" -- channel.json
+          git add channel.json
+          if git diff --cached --quiet; then
+            echo "release already matches — nothing to promote"
+            exit 0
+          fi
+          git commit -m "channel: promote from ${GITHUB_SHA::7}"
+          git push origin release
+          echo "promoted; students see it within the CDN's 300s"

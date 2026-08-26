@@ -1,0 +1,113 @@
+# The live channel, re-checked on a clock.
+#
+# channel-guard proves a tag is safe at the moment it is promoted. This proves
+# it is still safe. A tag can be deleted, force-moved, or made unreachable long
+# after CI went green, and the failure lands on students rather than on us: an
+# unresolvable pin kills pi with a raw Node stack trace before any extension
+# loads, so there is no in-product warning and no telemetry — the first signal
+# is a student saying "it won't open".
+#
+# Runs against `release`, the file students actually read, not against main.
+name: channel-watch
+
+on:
+  schedule:
+    # Every six hours. The CDN caches channel.json for 300s, so the worst case
+    # is roughly six hours of exposure plus five minutes of propagation.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.guard.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check the live channel
+        id: guard
+        run: node review/channel_guard.mjs --channel release
+
+  boot:
+    needs: watch
+    if: needs.watch.outputs.tags != '[]' && needs.watch.outputs.tags != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.watch.outputs.tags) }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+      - name: Boot ${{ matrix.tag }}
+        shell: bash
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -u
+          root="$RUNNER_TEMP/bootcheck"
+          rm -rf "$root"; mkdir -p "$root/home" "$root/mod/.pi" "$root/mod/lesson"
+          cat > "$root/mod/.pi/settings.json" <<EOF
+          { "packages": ["git:github.com/skojaku/pi-pair-notebook@$TAG"] }
+          EOF
+          echo '{"module":"channel-bootcheck","version":"0.0.0","title":"boot","chapters":[]}' \
+            > "$root/mod/lesson/index.json"
+          cd "$root/mod"
+          HOME="$root/home" MARIMO_URL=http://127.0.0.1:59999 PAIR_NOTEBOOK_NO_UPDATE=1 \
+            pi -p "hi" -a > boot.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 90); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill -9 $pid 2>/dev/null || true
+          tail -40 boot.log || true
+          grep -q "Failed to load extension" boot.log && { echo "::error::$TAG fails to load"; exit 1; }
+          ls "$root/home/.pi/agent/pair-notebook-channel/markers" 2>/dev/null \
+            | grep -q -- "--loaded--$TAG" \
+            || { echo "::error::$TAG starts but the toolkit never loads"; exit 1; }
+
+  # A red scheduled run is easy to not notice. An open issue is not.
+  alarm:
+    needs: [watch, boot]
+    if: always() && (needs.watch.result == 'failure' || needs.boot.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "channel-watch: the live update channel is not safe";
+            const body = [
+              "`channel-watch` failed against the `release` branch — the file students read.",
+              "",
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              "",
+              "A tag the channel advertises may have been deleted or moved. Students whose",
+              "clone is already on a good tag are unaffected until they update; anyone whose",
+              "pin names the missing tag cannot start pi at all.",
+              "",
+              "Freeze first, diagnose after — one commit on `main`:",
+              "",
+              '```json',
+              '{ "schema": 1, "frozen": true, "modules": { ... } }',
+              '```',
+            ].join("\n");
+            const open = await github.rest.issues.listForRepo({
+              ...context.repo, state: "open", labels: "channel",
+            });
+            const existing = open.data.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: ["channel"],
+              });
+            }
