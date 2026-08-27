@@ -4775,12 +4775,12 @@ export default function (pi: ExtensionAPI) {
         ...(picked.length > 0 ? { student_picked: picked } : {}),
         ...(responseSnappedFrom ? { response_retyped_as: responseSnappedFrom } : {}),
         ...(photoMissing ? { photo_missing: true } : {}),
-        // The guard above gives up after one refusal and logs anyway. It has
-        // to — but the build gate taught this file that a gate which gives up
-        // silently leaves a damaged row byte-identical to an honest one. Says
-        // only what is checkable: nothing was spoken between their last words
-        // and this close. A reveal given before their last message is not
-        // visible from here, and this does not claim otherwise.
+        // This is the whole of the reveal check now — there is no refusal
+        // above it any more. Says only what is checkable: nothing was spoken
+        // between their last words and this close. A reveal given before
+        // their last message is not visible from here, and this does not
+        // claim otherwise, which is exactly why refusing on it was the wrong
+        // shape.
         ...(revealDue && !spokeSince ? { closed_without_speaking: true } : {}),
         // The build guard gives up after two refusals and logs anyway — the
         // right call, since a guard that can strand a student is worse than
