@@ -36,53 +36,43 @@ rsync -a --exclude session_artifacts --exclude __marimo__ --exclude .skill-cache
 cp "$SANDBOX/notebook.template.py" "$SANDBOX/notebook.py"
 mkdir -p "$SANDBOX/session_artifacts"
 
-# The nb_* toolkit is the pi-pair-notebook package, not part of the module. Test the
-# WORKING TREE by default — the whole point of the harness is to exercise the
-# fix you just made — and fall back to the copy pi installed in the module.
+# The nb_* toolkit is the pi-pair-notebook package, not part of the module.
 # Fail loudly: with the wrong toolkit (or none) every nb_* call fails and the
 # whole run is a silent write-off. The toolkit speaks HTTP to marimo from Node
 # now, so there is no bridge script to stage or check for.
 #
-# The fallback used to be silent, and that is how a gate run tests the wrong
-# code. `../toolkit` does not exist in every layout — the ops repo keeps its
-# checkout at `pair-notebook/.software` — so the loop fell through to the copy
-# pi INSTALLED for the module, which is the pinned tag. The run then looks
-# perfect and says nothing about the fix you made ten minutes ago. Both
-# candidates are the working tree; anything else is announced loudly.
+# WHICH toolkit is the part that used to go wrong quietly. The search was
+# `../toolkit` and then the module's installed copy, so in a layout where
+# `../toolkit` does not exist — the ops repo keeps its checkout at
+# `pair-notebook/.software` — the run silently fell through to the PINNED tag.
+# It then looks perfect and says nothing about the fix you made ten minutes
+# ago. Worse, `.software` is itself a fetch of the pin (tools/fetch_software.sh
+# puts it there on purpose), so "the checkout this script lives in" is not
+# automatically the tree you are working in either.
+#
+# So this does not guess at a label. It resolves a path and PRINTS IT, with
+# the git description of whatever repo it came out of. `v0.10.0` on that line
+# means you are testing a tag; a branch name and a sha mean you are testing
+# work in progress. Read it before you read anything else.
 PAIR_NOTEBOOK_EXTENSION="${PAIR_NOTEBOOK_EXTENSION:-}"
-PAIR_NOTEBOOK_SOURCE="explicit (PAIR_NOTEBOOK_EXTENSION)"
 if [ -z "$PAIR_NOTEBOOK_EXTENSION" ]; then
   for cand in "$(cd "$(dirname "$0")/../toolkit" 2>/dev/null && pwd)/extensions/notebook-tool.ts" \
-              "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/extensions/notebook-tool.ts"; do
-    [ -f "$cand" ] && { PAIR_NOTEBOOK_EXTENSION="$cand"; PAIR_NOTEBOOK_SOURCE="working tree"; break; }
+              "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/extensions/notebook-tool.ts" \
+              "$MODULE_DIR/.pi/git/github.com/skojaku/pi-pair-notebook/extensions/notebook-tool.ts"; do
+    [ -f "$cand" ] && { PAIR_NOTEBOOK_EXTENSION="$cand"; break; }
   done
-fi
-if [ -z "$PAIR_NOTEBOOK_EXTENSION" ]; then
-  cand="$MODULE_DIR/.pi/git/github.com/skojaku/pi-pair-notebook/extensions/notebook-tool.ts"
-  if [ -f "$cand" ]; then
-    PAIR_NOTEBOOK_EXTENSION="$cand"
-    PAIR_NOTEBOOK_SOURCE="the module's INSTALLED PIN"
-    pin=$(python3 -c "
-import json,sys
-try:
-    print(next(p for p in json.load(open(sys.argv[1]))['packages'] if p.startswith('git:')))
-except Exception:
-    print('unknown')
-" "$MODULE_DIR/.pi/settings.json" 2>/dev/null || echo unknown)
-    cat >&2 <<WARN
-==============================================================================
-WARNING: no toolkit working tree found, so this gate run tests $pin —
-NOT your uncommitted changes. Any fix you are here to verify is invisible.
-Set PAIR_NOTEBOOK_EXTENSION=/path/to/pi-pair-notebook/extensions/notebook-tool.ts
-==============================================================================
-WARN
-  fi
 fi
 [ -f "$PAIR_NOTEBOOK_EXTENSION" ] || {
   echo "error: no pi-pair-notebook toolkit found — set PAIR_NOTEBOOK_EXTENSION=/path/to/extensions/notebook-tool.ts" >&2
   exit 1
 }
-echo "note: toolkit from $PAIR_NOTEBOOK_SOURCE — $PAIR_NOTEBOOK_EXTENSION" >&2
+PAIR_NOTEBOOK_ROOT=$(cd "$(dirname "$PAIR_NOTEBOOK_EXTENSION")/.." && pwd)
+PAIR_NOTEBOOK_VERSION=$(
+  git -C "$PAIR_NOTEBOOK_ROOT" describe --tags --always --dirty 2>/dev/null || echo "not a git checkout"
+)
+PAIR_NOTEBOOK_BRANCH=$(git -C "$PAIR_NOTEBOOK_ROOT" branch --show-current 2>/dev/null)
+echo "note: TOOLKIT UNDER TEST — $PAIR_NOTEBOOK_EXTENSION" >&2
+echo "note:   ${PAIR_NOTEBOOK_BRANCH:-(detached)} @ $PAIR_NOTEBOOK_VERSION" >&2
 # A previous session's photos would satisfy the photo guard before the student
 # has taken one, and the harness exists to test that guard.
 rm -rf "$SANDBOX/assets/uploads" "$SANDBOX/assets/exercises"
