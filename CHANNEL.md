@@ -13,8 +13,20 @@ https://raw.githubusercontent.com/skojaku/pi-pair-notebook/release/channel.json
 ```
 
 **`release`, not `main`.** `main` is where a tag is *proposed*; `release` is
-what CI promotes once it has proved that tag boots. Protect `release` so only
-the workflow can write it, or the gate is a habit rather than a gate.
+what CI promotes once it has proved that tag boots.
+
+`release` is protected: **no deletion, no force-push, and the rules apply to
+the owner too** (`enforce_admins`). What that buys is that the branch is
+append-only — nothing can rewrite or remove what CI promoted, by hand or by
+accident, and a student's `channel.json` cannot vanish mid-term.
+
+What it does NOT buy, and the earlier wording here promised: "only the
+workflow can write it". Push restrictions by actor are an organisation
+feature, and this is a personal repo, so an ordinary fast-forward push from
+the owner still lands. The protection makes the branch tamper-evident and
+undeletable; the discipline of promoting through CI is still discipline.
+`channel-watch` re-checking the live file every six hours is the part that
+notices if it was not followed.
 
 `raw.githubusercontent`, never `api.github.com`: the API allows 60
 unauthenticated calls an hour **per IP**, and a lecture hall behind one campus
