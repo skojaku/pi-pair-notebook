@@ -3876,64 +3876,37 @@ export default function (pi: ExtensionAPI) {
       { deliverAs: "followUp", triggerTurn: true },
     );
   });
-  // ── The breath before a drawing ─────────────────────────────────────────
-  // "Let me put both shapes up so we can see them side by side." "Let's put
-  // Alice's actual picture up." "I'll draw a new one." Every one of those went
-  // out immediately before a cell landed, in sessions run under an AGENTS.md
-  // whose longest passage is the ban on exactly this — and one of them came
-  // back near word-for-word as the failure that passage quotes. Prose was the
-  // fix twice and did not hold twice, so this is the same rule where the
-  // extension can see it.
-  //
-  // It cannot unsay the sentence: by the time a message ends it is on their
-  // screen. What it can do is stop the SECOND one, and in the run that
-  // motivated it there were two. Once per session, invisible, and never a
-  // refusal — a build is not worth blocking over a turn of phrase.
-  //
-  // Both halves must be true in the same message: a narration phrase AND a
-  // cell actually being inserted. "Let me know if that's unclear" is not this,
-  // and neither is a tutor saying "let's put that aside" with no tool call
-  // behind it.
-  const NARRATES_A_BUILD =
-    /\b(?:let me|let's|lets|i'?ll|i am going to|i'?m going to)\s+(?:\w+\s+){0,2}?(?:put|draw|add|build|show|render|sketch|set up|pop|drop)\b/i;
-  const BUILDS_A_CELL = new Set(["nb_add_cell", "nb_add_template", "nb_add_exercise"]);
-  let narrationNudged = false;
-  pi.on("message_end", async (event: any) => {
+  // The runaway guard's only re-arm. It used to sit at the top of the
+  // narration nudge's own message_end handler, so deleting that block would
+  // have taken this line with it and left the guard dead for the rest of the
+  // session after its first fire. It gets its own handler now.
+  pi.on("message_end", async () => {
     runawayFired = false;
-    if (narrationNudged) return;
-    try {
-      const content = event?.message?.content;
-      if (event?.message?.role !== "assistant" || !Array.isArray(content)) return;
-      const spoke = content
-        .filter((p: any) => p?.type === "text" && typeof p.text === "string")
-        .map((p: any) => p.text)
-        .join("\n");
-      const builds = content.some(
-        (p: any) => p?.type === "toolCall" && BUILDS_A_CELL.has(String(p?.name ?? p?.toolName ?? "")),
-      );
-      if (!builds || !NARRATES_A_BUILD.test(spoke)) return;
-      narrationNudged = true;
-      pi.sendMessage(
-        {
-          customType: "narration-nudge",
-          content:
-            `NOTE (invisible to the student): you just told them you were about to ` +
-            `put something in the notebook, and then put it there. They can see the ` +
-            `cell arrive; the sentence in front of it only announces plumbing, and ` +
-            `AGENTS.md rules it out for that reason.\n` +
-            `From here on, when you build: either say what the picture is FOR — ` +
-            `"here are the two shapes side by side: which one has the third line?" — ` +
-            `or say nothing and let the cell speak. Never that you are about to make ` +
-            `one. Do not mention this note and do not apologise for the last one.`,
-          display: false,
-        },
-        { deliverAs: "nextTurn" },
-      );
-    } catch {
-      /* style is steered, never enforced: a nudge that fails costs nothing */
-    }
   });
 
+  // ── The breath before a drawing, and why it is not here any more ─────────
+  // "Let me put both shapes up so we can see them side by side." "I'll draw a
+  // new one." Every one of those went out immediately before a cell landed,
+  // in sessions run under an AGENTS.md whose longest passage is the ban on
+  // exactly this.
+  //
+  // This file answered that with a regex over "let me|I'll" + "put|draw|add
+  // |show", fired once per session as an invisible note. It was never a
+  // refusal and it could not unsay the sentence — by the time a message ends
+  // it is on their screen — so at best it stopped the second one. What it
+  // actually was is a bet on one model's phrasing, which is the shape of fix
+  // that has failed here every single time: five review rounds, and every
+  // fault answered with a prohibition came back somewhere new, while every
+  // fault answered with literal words in the chapter script stayed fixed.
+  //
+  // So the words are in the scripts now, at every site that inserts a cell in
+  // both modules: the step names the insert, quotes what to say next, and
+  // says in as many words that nothing goes in front of it. m01 had none of
+  // those sentences and now has twelve; m02 has six. That is where this lives.
+  //
+  // `empty-turn` in turn_end stays, and the contrast is the point: it tests
+  // `stopReason` and an empty content array. It infers nothing about what the
+  // tutor meant to say.
   // Fixed-choice questions go through the ask_user_question tool
   // (@juicesharp/rpiv-ask-user-question package, declared in .pi/settings.json).
 
