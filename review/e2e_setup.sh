@@ -42,17 +42,47 @@ mkdir -p "$SANDBOX/session_artifacts"
 # Fail loudly: with the wrong toolkit (or none) every nb_* call fails and the
 # whole run is a silent write-off. The toolkit speaks HTTP to marimo from Node
 # now, so there is no bridge script to stage or check for.
+#
+# The fallback used to be silent, and that is how a gate run tests the wrong
+# code. `../toolkit` does not exist in every layout — the ops repo keeps its
+# checkout at `pair-notebook/.software` — so the loop fell through to the copy
+# pi INSTALLED for the module, which is the pinned tag. The run then looks
+# perfect and says nothing about the fix you made ten minutes ago. Both
+# candidates are the working tree; anything else is announced loudly.
 PAIR_NOTEBOOK_EXTENSION="${PAIR_NOTEBOOK_EXTENSION:-}"
+PAIR_NOTEBOOK_SOURCE="explicit (PAIR_NOTEBOOK_EXTENSION)"
 if [ -z "$PAIR_NOTEBOOK_EXTENSION" ]; then
   for cand in "$(cd "$(dirname "$0")/../toolkit" 2>/dev/null && pwd)/extensions/notebook-tool.ts" \
-              "$MODULE_DIR/.pi/git/github.com/skojaku/pi-pair-notebook/extensions/notebook-tool.ts"; do
-    [ -f "$cand" ] && { PAIR_NOTEBOOK_EXTENSION="$cand"; break; }
+              "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/extensions/notebook-tool.ts"; do
+    [ -f "$cand" ] && { PAIR_NOTEBOOK_EXTENSION="$cand"; PAIR_NOTEBOOK_SOURCE="working tree"; break; }
   done
+fi
+if [ -z "$PAIR_NOTEBOOK_EXTENSION" ]; then
+  cand="$MODULE_DIR/.pi/git/github.com/skojaku/pi-pair-notebook/extensions/notebook-tool.ts"
+  if [ -f "$cand" ]; then
+    PAIR_NOTEBOOK_EXTENSION="$cand"
+    PAIR_NOTEBOOK_SOURCE="the module's INSTALLED PIN"
+    pin=$(python3 -c "
+import json,sys
+try:
+    print(next(p for p in json.load(open(sys.argv[1]))['packages'] if p.startswith('git:')))
+except Exception:
+    print('unknown')
+" "$MODULE_DIR/.pi/settings.json" 2>/dev/null || echo unknown)
+    cat >&2 <<WARN
+==============================================================================
+WARNING: no toolkit working tree found, so this gate run tests $pin —
+NOT your uncommitted changes. Any fix you are here to verify is invisible.
+Set PAIR_NOTEBOOK_EXTENSION=/path/to/pi-pair-notebook/extensions/notebook-tool.ts
+==============================================================================
+WARN
+  fi
 fi
 [ -f "$PAIR_NOTEBOOK_EXTENSION" ] || {
   echo "error: no pi-pair-notebook toolkit found — set PAIR_NOTEBOOK_EXTENSION=/path/to/extensions/notebook-tool.ts" >&2
   exit 1
 }
+echo "note: toolkit from $PAIR_NOTEBOOK_SOURCE — $PAIR_NOTEBOOK_EXTENSION" >&2
 # A previous session's photos would satisfy the photo guard before the student
 # has taken one, and the harness exists to test that guard.
 rm -rf "$SANDBOX/assets/uploads" "$SANDBOX/assets/exercises"
@@ -207,6 +237,15 @@ fi
 # instructor's skills in the tutor's context, on a tutor whose contract says
 # it never uses one.
 #
+# `--exclude-tools bash` is deliberately NOT here any more. The toolkit strips
+# bash itself, from session_start — and it did not, for a long time, because
+# the strip ran in the extension factory where pi binds that API to a stub
+# that throws, and the surrounding catch swallowed it every time. It read as
+# working precisely because this line hid it: D8 says "no bash", and the one
+# place D8 was ever checked had bash removed on the command line before the
+# tutor started. A student's pi has no such flag. If the strip regresses, the
+# gate must be the thing that notices.
+#
 # --no-extensions keeps the MACHINE's global extensions out, but it also
 # stops pi discovering the packages the module declares in .pi/settings.json
 # — and one of those is ask_user_question, the dialog the scripts require for
@@ -248,7 +287,7 @@ ENVS=(--env "TUTOR_VISION_MODEL=${TUTOR_VISION_MODEL:-netsci/vision}"
 
 herdr agent start "$AGENT" --cwd "$SANDBOX" --no-focus \
   "${ENVS[@]}" \
-  -- pi --model "$TUTOR_MODEL" --thinking low --exclude-tools bash -a \
+  -- pi --model "$TUTOR_MODEL" --thinking low -a \
      --no-skills --no-prompt-templates \
      --no-extensions "${EXTS[@]}" "$KICKOFF" >/dev/null
 

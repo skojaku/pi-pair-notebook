@@ -30,6 +30,36 @@ import { uuidv7 } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import { Text } from "@earendil-works/pi-tui";
 import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// The pure half of this toolkit, in files a test runner can reach. Nothing
+// under a tool is on any boot path — `pi -p "hi"` enters the factory and
+// session_start and stops — so anything that can be a function of its
+// arguments belongs there, where `npm test` runs it. See lib/verbatim.ts.
+// The `.ts` in the specifier is deliberate: it is the one form both node's
+// type-stripping and pi's jiti loader accept, so one source file serves both
+// with no build step.
+import {
+  bigramDice,
+  baseCheckpointId,
+  chooseQuotedWithFallback,
+  driftIsReportable,
+  editDistanceAtMost,
+  fillSlots,
+  isDialogSentinel,
+  isFigure,
+  isFillerMessage,
+  matchDetourQuestion,
+  normMsg,
+  repairQuotes,
+  slotDrift,
+  slotMarkers,
+  SLOT_GLUE,
+  slotTokens,
+  snapToTranscript,
+  snapCheckpointId as snapIdAgainst,
+  truncatedQuote,
+  withQuotedQuestion,
+} from "./lib/verbatim.ts";
+import { py, pyList, pyMd, sanitize, stripRedundantImports } from "./lib/pysrc.ts";
 
 /** This file's directory. */
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -82,73 +112,6 @@ function markChannel(kind: "loaded" | "healthy"): void {
   }
 }
 
-/** JSON string literals are valid Python string literals. */
-const py = (s: string) => JSON.stringify(s);
-
-/**
- * The argument of an `mo.md(...)` call, as a RAW triple-quoted literal.
- *
- * `py()` is wrong here, and silently so. marimo recognises a markdown cell
- * when it saves the file and rewrites it as a triple-quoted literal, copying
- * the r/f prefix from the ORIGINAL source token — so a note created as
- * `mo.md("…\\frac…")` is written back as a NON-raw `mo.md("""…\frac…""")`,
- * and the next reload lets Python eat `\f`, `\a`, `\r`, `\t`. That is how
- * the module's central definition ended up on screen as
- * `C_i = rac{ ext{friendships…}}`, and $L = 7/6 pprox 1.17$ beside it.
- * Every note skeleton is full of LaTeX, so this hit the keepsake hardest.
- *
- * A raw string cannot contain `"""` and cannot end in a backslash, so the
- * text is split into raw chunks glued together with ordinary literals. In
- * the normal case (no triple quote anywhere) that is exactly the
- * `r"""…"""` marimo writes for itself.
- *
- * The prefix marimo copies is the LAST string token's, so that token must be
- * raw no matter what the text ends with — and a note ends with the student's
- * own words, which can perfectly well end in a quotation mark. Padding the
- * final chunk with one newline (invisible in markdown) keeps it raw instead
- * of peeling it into an ordinary literal and losing the prefix again.
- */
-function pyMd(markdown: string): string {
-  const chunk = (s: string): string => {
-    if (!s) return '""';
-    // Neither a quote nor a backslash may sit against the closing """ —
-    // peel any trailing run of them into an ordinary escaped literal.
-    const tail = /["\\]+$/.exec(s);
-    if (!tail) return `r"""${s}"""`;
-    const head = s.slice(0, s.length - tail[0].length);
-    return head ? `r"""${head}""" ${py(tail[0])}` : py(tail[0]);
-  };
-  const parts = markdown.replace(/\r\n/g, "\n").split('"""');
-  const last = parts.length - 1;
-  if (parts[last] === "" || /["\\]$/.test(parts[last])) parts[last] += "\n";
-  return parts.map(chunk).join(` '"""' `);
-}
-const pyList = (xs: string[]) => JSON.stringify(xs);
-const sanitize = (s: string) => s.replace(/\W/g, "_");
-
-/**
- * The starter notebook already owns mo/nx/np/plt. Models add these imports
- * anyway, which triggers marimo's multiply-defined-name rejection (seen in
- * production) — strip them from submitted cell bodies.
- */
-function stripRedundantImports(code: string): string {
-  const redundant = [
-    /^\s*import marimo as mo\s*$/,
-    /^\s*import marimo\s*$/,
-    /^\s*import networkx as nx\s*$/,
-    /^\s*import numpy as np\s*$/,
-    /^\s*import matplotlib\.pyplot as plt\s*$/,
-    /^\s*from matplotlib import pyplot as plt\s*$/,
-    /^\s*import igraph as ig\s*$/,
-    /^\s*import seaborn as sns\s*$/,
-    /^\s*import altair as alt\s*$/,
-    /^\s*import pandas as pd\s*$/,
-  ];
-  return code
-    .split("\n")
-    .filter((line) => !redundant.some((re) => re.test(line)))
-    .join("\n");
-}
 
 /**
  * Ask the browser to bring a cell into view (marimo's focus-cell op) — new
@@ -1687,26 +1650,14 @@ function checkpointOrder(): string[] {
   return loadChapters().flatMap((c) => c.checkpoints);
 }
 
-/** "cp2_distance_extra" (an improvised practice round) → "cp2_distance". */
-function baseCheckpointId(id: string): string {
-  // Repeated, because a looping tutor produced "cp0_welcome_extra_extra" —
-  // one strip left an id no lookup could match, which silently disabled the
-  // ordering guard and the note skeleton for every later round.
-  let out = id;
-  for (let i = 0; i < 8; i++) {
-    const next = out.replace(/_extra(_?\d+)?$/, "");
-    if (next === out) break;
-    out = next;
-  }
-  return out;
-}
-
 function isScriptedCheckpoint(id: string): boolean {
   return checkpointOrder().includes(baseCheckpointId(id));
 }
 
 /**
- * Pull a checkpoint id back onto the script when the model has drifted near it.
+ * Pull a checkpoint id back onto the script when the model has drifted near
+ * it. The comparison lives in lib/verbatim.ts, where it can be run; the disk
+ * read is the only thing that has to stay here.
  *
  * `judgment` is validated against a list and `student_response` against empty,
  * but `id` — the key everything else is looked up by — was taken as given. One
@@ -1715,48 +1666,10 @@ function isScriptedCheckpoint(id: string): boolean {
  * instructor's note cell never reaches the keepsake; the build guard and the
  * ordering guard stop recognising the checkpoint; and the closing summary
  * reports "14 of 15" while the notebook shows an answer under a misspelled
- * heading. A weak model produces exactly this kind of drift, and
- * baseCheckpointId's own comment records a real one (`cp0_welcome_extra_extra`).
- *
- * Snapping beats refusing: the tutor has already asked the question and heard
- * the answer, and a refusal it cannot satisfy costs the student the row. Only
- * near misses snap — case, the -/_ confusion, and one edit away — so an id for
- * a genuinely different checkpoint still falls through to the caller's refusal.
+ * heading.
  */
-function snapCheckpointId(id: string): { id: string; snappedFrom?: string } {
-  const base = baseCheckpointId(id);
-  const order = checkpointOrder();
-  if (order.includes(base)) return { id };
-  const suffix = id.slice(base.length); // "_extra", "_extra2", ""
-  const norm = (s: string) => s.toLowerCase().replace(/[-\s.]/g, "_");
-  const target = norm(base);
-  let hit = order.find((c) => norm(c) === target);
-  if (!hit) {
-    // One edit away (a dropped, doubled or swapped character), and only when
-    // exactly one candidate is that close — an ambiguous near miss is not a
-    // near miss.
-    const within1 = order.filter((c) => editDistanceAtMost(norm(c), target, 1));
-    if (within1.length === 1) hit = within1[0];
-  }
-  return hit ? { id: hit + suffix, snappedFrom: id } : { id };
-}
-
-/** True when `a` and `b` differ by at most `max` insertions/deletions/substitutions. */
-function editDistanceAtMost(a: string, b: string, max: number): boolean {
-  if (Math.abs(a.length - b.length) > max) return false;
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
-    let best = i;
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
-      best = Math.min(best, cur[j]);
-    }
-    if (best > max) return false; // no cell in this row can still win
-    prev = cur;
-  }
-  return prev[b.length] <= max;
-}
+const snapCheckpointId = (id: string): { id: string; snappedFrom?: string } =>
+  snapIdAgainst(id, checkpointOrder());
 
 /** The checkpoint the tutor is expected to work next, or null if unknown. */
 /**
@@ -2186,20 +2099,6 @@ let pickedMark = 0;
  */
 let awaitingResumeChoice = false;
 
-/**
- * A sentence the DIALOG produced, not the student. The package has more
- * than one: "User declined to answer questions" when it is dismissed, and
- * "User wants to chat about this. Continue the conversation to help them
- * decide." when the student takes the chat row, which sits in every
- * single-select nav cycle. Stored, either printed in the submitted record
- * as the student's own *You chose:* line — and the chat one also made the
- * picker check refuse twice and stamp a false quoting warning on the row.
- * Every one of them opens with "User ", which no option label here does.
- */
-const isDialogSentinel = (s: string): boolean =>
-  /^user (declined to answer|wants to chat)/i.test(s.trim()) ||
-  /^\(no input\)$/i.test(s.trim());
-
 function recordPickedAnswer(event: any): void {
   try {
     if (!/ask.?user.?question/i.test(String(event?.toolName ?? ""))) return;
@@ -2306,110 +2205,6 @@ function studentSaidSince(ctx: any, commit = true): string[] {
   } catch {
     return [];
   }
-}
-
-/**
- * The note cell's «slots» are the graded artifact's centerpiece: they must be
- * the STUDENT's words, not the tutor's prose. A live session produced
- * "A–D = 2, and the average over all 6 pairs = 7/6 ≈ 1.17" from a student who
- * had typed only "yes", "2", "7/6" — a fabricated number presented as their
- * work. So the extension checks the fills against what the student actually
- * said (transcript capture + the tutor's own verbatim field) and refuses once.
- *
- * Tolerant by design: word order, joining and connective words are free; what
- * it catches is invented content — any number they never gave, or several
- * added content words.
- */
-const SLOT_GLUE = new Set([
-  "a", "an", "and", "the", "of", "to", "in", "on", "at", "is", "are", "was", "were",
-  "it", "its", "i", "my", "me", "we", "our", "you", "your", "that", "this", "these",
-  "those", "so", "then", "for", "with", "as", "but", "or", "if", "not", "be", "been",
-  "there", "here", "each", "every", "both", "than", "when", "because", "about",
-  // Structural labels a tutor puts around a multi-part answer — the note
-  // skeletons say «their answers, verbatim» (plural) for the 3-6 part
-  // checkpoints, so "Idea: … Count: … Fraction: …" is the natural shape and
-  // must not read as invented content.
-  "idea", "answer", "answers", "count", "counts", "fraction", "result", "work",
-  "note", "first", "second", "third", "final", "total", "corrected", "then",
-]);
-
-function slotTokens(s: string): string[] {
-  const norm = s
-    .toLowerCase()
-    .replace(/[‐-―−]/g, "-")
-    .replace(/[*_`>#]/g, " ");
-  return norm.match(/[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?/g) ?? [];
-}
-
-/**
- * A "figure": 7/6, 1.17, 4.74, 0.61 — a compound or multi-digit
- * number. Bare single digits are NOT figures: they are how a subscript
- * ($L_0$ → "l", "0") and an ordinary label ("dot 1 to dot 5") tokenize, and
- * flagging those refused faithful records.
- */
-function isFigure(token: string): boolean {
-  return /^\d+([./:,-]\d+)+$|^\d{2,}$/.test(token);
-}
-
-/**
- * Character-bigram overlap (Dice), 0–1. Used to spot a RETYPED answer: a
- * live session logged "becuase tirangles are ipormtat" for a student who
- * typed "becuase tirangles are ipmortat" — the model copied their sentence
- * out by hand and re-scrambled their own typo along the way. Word-level
- * drift cannot see that (one odd token), and it is exactly the kind of
- * silent edit the graded record must not carry.
- */
-function bigramDice(a: string, b: string): number {
-  const grams = (s: string) => {
-    const t = s.toLowerCase().replace(/\s+/g, " ").trim();
-    const out = new Set<string>();
-    for (let i = 0; i + 1 < t.length; i += 1) out.add(t.slice(i, i + 2));
-    return out;
-  };
-  const A = grams(a);
-  const B = grams(b);
-  if (A.size === 0 || B.size === 0) return 0;
-  let hits = 0;
-  for (const g of A) if (B.has(g)) hits += 1;
-  return (2 * hits) / (A.size + B.size);
-}
-
-/**
- * If `response` is a near-copy of one of the student's own messages, return
- * that message instead — their words, character for character.
- *
- * Similarity alone is not enough to act on. Joining several short answers
- * into one ("A–D is 2, and the average is 7/6 over all six pairs") is the
- * sanctioned shape — the skeletons say «their answers, verbatim», plural —
- * and it scores nearly as high against its longest fragment as a retype
- * does against the whole message. Snapping there would delete half the
- * student's answer from the graded record, so a candidate must also be
- * about the same LENGTH: a retype is, a swallowed fragment is not.
- */
-function snapToTranscript(response: string, said: string[]): string | null {
-  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
-  if (said.some((s) => flat(s) === flat(response) || flat(s).includes(flat(response)))) return null;
-  let best: { score: number; text: string } | null = null;
-  for (const s of said) {
-    const score = bigramDice(s, response);
-    if (!best || score > best.score) best = { score, text: s };
-  }
-  if (!best || best.score < 0.8) return null;
-  const longest = Math.max(best.text.length, response.length);
-  return Math.abs(best.text.length - response.length) <= 0.15 * longest ? best.text : null;
-}
-
-/** Content tokens in `fill` that the student never produced. */
-function slotDrift(fill: string, studentPool: string[]): { numbers: string[]; words: string[] } {
-  const pool = new Set(studentPool.flatMap(slotTokens));
-  const numbers: string[] = [];
-  const words: string[] = [];
-  for (const t of new Set(slotTokens(fill))) {
-    if (pool.has(t) || SLOT_GLUE.has(t)) continue;
-    if (isFigure(t)) numbers.push(t);
-    else words.push(t);
-  }
-  return { numbers, words };
 }
 
 /**
@@ -2576,7 +2371,13 @@ function scriptedPhotoCells(cpId: string): string[] {
  * guessing.
  */
 function scriptedQuestionCount(cpId: string): number {
-  return (checkpointBlock(cpId, "ask").match(/^\s*\d+\.\s/gm) ?? []).length;
+  // "2b." counts as its own question. A script that splits a step in two —
+  // ask, then invite the self-check box in the student's own beat — asks one
+  // more thing than its top-level numbering says, and the late-close gate
+  // compares this number against how many messages the student sent. Without
+  // the optional letter it reads a sub-step as an unexplained extra answer
+  // and nudges a tutor that did exactly what the script asked.
+  return (checkpointBlock(cpId, "ask").match(/^\s*\d+[a-z]?\.\s/gm) ?? []).length;
 }
 
 /**
@@ -2656,71 +2457,7 @@ function tutorSpokeSinceStudent(ctx: any): boolean {
   return true;
 }
 
-/** The «…» markers of a note skeleton, in order. */
-function slotMarkers(skeleton: string): string[] {
-  return skeleton.match(/«[^»]*»/g) ?? [];
-}
-
-/**
- * Fill a note skeleton's «slots» in order.
- *
- * An unsupplied slot falls back to `student_response` — but only the FIRST
- * one. Padding every empty slot with it printed the same sentence under
- * three different labels once the skeletons were split into a slot per part
- * ("The ring world: …", "The random world: <same sentence>", "Which one I
- * live in: <same sentence>"), which reads as the student saying something
- * they never said. checkpoint_done nudges for the missing fills before it
- * ever gets here; this is the shape when it has nudged twice and given up.
- */
-/**
- * Words that can only ever be a student clearing their throat. A «verbatim»
- * note slot quotes what they typed since the last checkpoint, and a live
- * stream is not all answer: "yep im ready" to a pace question, "ohh ok got
- * it" after a hint, and the student's OWN detour question all landed in the
- * keepsake as their worked answer — the more they engaged, the more polluted
- * their note. Lesson answers are never made ONLY of these, and the one that
- * could be ("right", "sure") is rescued by the student_response check below.
- */
-const ACK_WORDS = new Set(
-  ("ok okay k kk yep yup yeah ya sure right true ready im i m ive got it gotcha see ah oh ohh " +
-    "hm hmm mm uh huh thanks thanku thank you cool nice great awesome perfect makes sense " +
-    "understood understand lets go going next continue done finished fine alright allright " +
-    "sounds good please well so and then ill let s " +
-    // normMsg strips the apostrophe, so "let's" arrives as "lets" and never
-    // matched the "let" + "s" pair above. With the words that travel with it:
-    // "yeah lets keep going" answered the tutor's "ready to move on?" after a
-    // detour and was filed in the next checkpoint's note as the student's
-    // worked answer, between two real ones. Every word must be an ack word
-    // for a message to be dropped, so these cannot swallow an answer alone.
-    "lets keep carry on move moving ahead forward " +
-    // A whole turn answering the tutor's own offer — "yeah, a quick note would
-    // be nice" — is not the student's work, and a live run left it sitting in
-    // the note between two real answers. `yes` and `no` stay OUT: they can be
-    // the answer to a lesson question.
-    // `this`, `that`, `one` are NOT here: "this one", answering "which of the
-    // two worlds do you live in?", is half an answer, and adding them deleted
-    // it from the keepsake while the student's reason survived.
-    "would could should will do does did a an the be is are quick note maybe bit little")
-    .split(" "),
-);
-const normMsg = (m: string) =>
-  m
-    .toLowerCase()
-    .replace(/['\u2018\u2019\u02BC]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-/** True for a message that is acknowledgement and nothing else. */
-function isFillerMessage(m: string): boolean {
-  const t = normMsg(m);
-  if (!t || /\d/.test(t)) return false;
-  const words = t.split(" ");
-  // Eight, not five: the live example ran seven. Still short enough that a
-  // real answer is safe — and one that is not is rescued by matching
-  // student_response.
-  if (words.length > 8) return false;
-  return words.every((w) => ACK_WORDS.has(w));
-}
-
+/** Names of every cell currently in the notebook, or null if unreadable. */
 /**
  * Questions the student asked that are already recorded as detours. Their own
  * question is not their answer, and log_detour deliberately peeks at the
@@ -2854,59 +2591,6 @@ function preQuestionCount(ctx: any): number {
   }
 }
 
-function fillSlots(skeleton: string, slots: string[], fallback: string): string {
-  let i = 0;
-  let usedFallback = false;
-  return skeleton.replace(/«[^»]*»/g, () => {
-    const supplied = slots[i];
-    i += 1;
-    // `.trim()`, matching the slot-count guard: a whitespace pad satisfied
-    // neither, and rendered as a heading with nothing under it.
-    if (supplied !== undefined && supplied.trim() !== "") return supplied;
-    // The fallback is for a ONE-slot skeleton. On a skeleton whose other slot
-    // already quotes the student, using it again printed their sentence twice
-    // in one line: "**My guess:** way off, i said 20 — "way off, i said 20"".
-    if (!fallback.trim() || usedFallback) return "*(not answered)*";
-    usedFallback = true;
-    return fallback;
-  });
-}
-
-/**
- * A souvenir cell opens with the student's own question, quoted. Every live
- * session so far produced detour cells that answered a question the notebook
- * never states — unreadable months later, and the personalization is the
- * whole point of a souvenir. So the extension puts the quote there itself
- * rather than trusting the model to remember, and skips it when the markdown
- * already carries the question. The line goes under a leading heading if
- * there is one, so "### 🧭 Detour: …" stays first.
- */
-function withQuotedQuestion(markdown: string, question: string, alsoQuoted = ""): string {
-  if (!question) return markdown;
-  // Words, not bytes — and the log_detour gap check normalises the same
-  // way, or the two halves of the contract disagree: a cell that quotes
-  // "can't" against a question typed "cant" satisfies that check and then
-  // gets a SECOND copy of the question prepended by this one.
-  const flat = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/['\u2018\u2019\u02BC"\u201C\u201D]/g, "")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-  // `question` may have been upgraded to the student's fuller message after
-  // the model authored this cell, so the model's own wording counts as
-  // already-quoted too. Missing that put "You asked" in the cell twice.
-  if (flat(markdown).includes(flat(question))) return markdown;
-  if (alsoQuoted && flat(markdown).includes(flat(alsoQuoted))) return markdown;
-  const quote = `> 🧭 **You asked:** “${question}”`;
-  const lines = markdown.split("\n");
-  if (/^\s*#{1,6}\s/.test(lines[0] ?? "")) {
-    return [lines[0], "", quote, ...lines.slice(1)].join("\n");
-  }
-  return `${quote}\n\n${markdown}`;
-}
-
-/** Names of every cell currently in the notebook, or null if unreadable. */
 async function notebookCellNames(signal?: AbortSignal): Promise<string[] | null> {
   const r = await runKernel(
     `import marimo._code_mode as cm\n` +
@@ -3992,7 +3676,10 @@ export default function (pi: ExtensionAPI) {
           details: {},
         };
       }
-      turnsInCheckpoint = 0;
+      // -1, not 0, for the reason spelled out at checkpoint_done's own reset:
+      // turn_end has not run for this turn yet, and it belongs to the chapter
+      // that just ended.
+      turnsInCheckpoint = -1;
       writeChapterState(next.id);
       // Re-arm the build-ordering guard on the new chapter's first
       // checkpoint, so it keeps working across the transition instead of
@@ -4357,8 +4044,18 @@ export default function (pi: ExtensionAPI) {
       // Their answer to a question that is still hanging would be eaten by
       // this tool's own dialog. Once — a rhetorical closer is one retry away,
       // and the retry needs no speech.
+      //
+      // Every gate below stands aside for a live referee ruling, and this one
+      // is where that rule is written down. The verdict the student's ⚖️
+      // appeal produces says, in the message the model reads: "If a gate
+      // refused you before, it will let this ruling through now." That was
+      // true of the build and photo gates only; the hanging, slot-count,
+      // drift and late-close gates never consulted the waiver, so an appeal
+      // that ruled accept_and_close could still be refused by four of the six
+      // — the tutor promising the student their answer counts and then not
+      // being able to log it.
       const hanging = tutorAwaitingAnswer(ctx);
-      if (hanging && (slotDriftWarned.get(`${id}:hanging`) ?? 0) < 1) {
+      if (hanging && (slotDriftWarned.get(`${id}:hanging`) ?? 0) < 1 && !refereeWaiverActive()) {
         slotDriftWarned.set(`${id}:hanging`, 1);
         return toResult({
           out:
@@ -4437,11 +4134,21 @@ export default function (pi: ExtensionAPI) {
       // the question, and the guard did not notice.
       const photoStrikes = slotDriftWarned.get(`${id}:photo`) ?? 0;
       const saidSoFar = studentSaidSince(ctx, false);
+      // "Typed something SINCE the refusal", measured against where the
+      // transcript stood WHEN the refusal went out — not against the whole
+      // checkpoint. saidSoFar counts from the last checkpoint close, so on a
+      // checkpoint where the student had already answered anything at all
+      // this read true on the very first retry and quietly collapsed the two
+      // nudges into one. The page is the point on these checkpoints; the
+      // second ask is the one that usually gets it.
+      const saidWhenAsked = slotDriftWarned.get(`${id}:photoSaid`);
+      const typedSinceAsk =
+        photoStrikes > 0 && saidWhenAsked !== undefined && saidSoFar.length > saidWhenAsked;
       const cameraSaidHere =
-        saidSoFar.some((m) => /camera|photo|picture|scan|phone/i.test(m)) ||
-        (photoStrikes > 0 && saidSoFar.length > 0);
+        saidSoFar.some((m) => /camera|photo|picture|scan|phone/i.test(m)) || typedSinceAsk;
       if (photoMissing && photoStrikes < (cameraSaidHere ? 1 : 2) && !refereeWaiverActive()) {
         slotDriftWarned.set(`${id}:photo`, photoStrikes + 1);
+        slotDriftWarned.set(`${id}:photoSaid`, saidSoFar.length);
         return toResult({
           out:
             `NOT LOGGED — this is a pen-and-paper checkpoint and no photo has reached ` +
@@ -4464,8 +4171,7 @@ export default function (pi: ExtensionAPI) {
       // ── The close with nothing said in front of it ──────────────────────
       // AGENTS.md says "The reveal comes BEFORE checkpoint_done, always", with
       // the live failure that motivated it written out underneath — and in one
-      // m02 session it was broken three times anyway. This is the same rule
-      // where the tool can see it.
+      // m02 session it was broken three times anyway.
       //
       // The tell needs no reading of meaning: has the tutor said ANYTHING
       // since the student last typed? At cp2_diameter and cp3_clustering the
@@ -4473,41 +4179,18 @@ export default function (pi: ExtensionAPI) {
       // carrying no text block, so the student went from their own answer to
       // "Where to next?" with not one word in between.
       //
-      // Placed AFTER the build and photo gates on purpose. Those two send the
-      // tutor away to insert a template and ask for a page, and making it
-      // deliver a reveal before the figure the reveal points at is backwards.
-      // The price is a blind spot — a tutor that speaks only while fixing a
-      // missing build makes this go quiet — and it costs nothing on the three
-      // rows that motivated it: two are `build: none`, and the third's build
-      // was already in the notebook.
-      //
-      // Once, like the hanging guard above, and with the same escape, which
-      // goes FIRST here: this guard's one realistic false positive is a tutor
-      // that already gave the reveal and had the student react to it since,
-      // and a model reading top-down would otherwise say the reveal twice.
-      // A guard that will not let go is worse than the fault it catches.
+      // RECORDED, not refused. Every field on the row is true either way:
+      // what the student lost is the payoff beat, not the record of their
+      // work. `closed_without_speaking` has been on the row since the guard
+      // gave up after one strike anyway, and a grader reading it can see
+      // exactly what happened. Refusing bought one retry and cost a false
+      // positive nobody could see: the guard cannot tell "said nothing" from
+      // "gave the reveal before their last message", which is why it already
+      // carried an escape hatch telling the model to call again immediately.
+      // The rule itself lives where it holds — the chapter script, which now
+      // spells out the reveal's words at the sites this fired on.
       const revealDue = !!scriptedReveal(baseCheckpointId(id));
       const spokeSince = revealDue ? tutorSpokeSinceStudent(ctx) : true;
-      const revealStrikes = slotDriftWarned.get(`${id}:reveal`) ?? 0;
-      if (revealDue && !spokeSince && revealStrikes < 1 && !refereeWaiverActive()) {
-        slotDriftWarned.set(`${id}:reveal`, 1);
-        return toResult({
-          out:
-            `NOT LOGGED — you have said nothing to the student since they last typed, ` +
-            `and this checkpoint has a reveal_after.\n` +
-            `If you already gave that reveal and I have this wrong, call checkpoint_done ` +
-            `again right now — it will log, and you need not repeat yourself or say ` +
-            `anything first.\n` +
-            `Otherwise: closing here drops the "Where to next?" picker straight under ` +
-            `their answer, so they get a dialog where the payoff should be — and on a ` +
-            `short terminal that is the last they see of it. A live run did exactly this ` +
-            `three times in one session. SPEAK FIRST, in plain text, in this turn: one ` +
-            `specific line about what THEY said, then this checkpoint's reveal_after in ` +
-            `short spoken beats — your own words, no headings, no $math$ read aloud. ` +
-            `THEN call checkpoint_done again.`,
-          failed: false,
-        });
-      }
       // Peek, don't consume: a refusal below must leave the transcript mark
       // where it was, or the retry would log an empty student_said_verbatim.
       const said = studentSaidSince(ctx, false);
@@ -4566,43 +4249,19 @@ export default function (pi: ExtensionAPI) {
       // different set, and every word they typed is still on the graded row.
       // note_skipped_msgs below already numbers what the note passed over.
       const preAsk = preQuestionCount(ctx);
-      const quoteSet = (cut: number, dropDetours: boolean) => {
-        const from: number[] = [];
-        const keep = said.filter((m, i) => {
-          const isResponse =
-            normMsg(m) === normMsg(response) || bigramDice(m, response) >= 0.6;
-          // Inside a detour the student was answering the tutor's aside, not
-          // this checkpoint. detourAsked already drops their question; this
-          // drops the rest of the exchange around it.
-          const inDetour = dropDetours && detourSpans.some(([a, b]) => i >= a && i <= b);
-          // The BOUNDARY decides what to drop; content may only ever RESCUE.
-          // That asymmetry is the whole difference between this and growing
-          // ACK_WORDS, which has twice deleted real answers from a graded
-          // artifact: a word list decides on its own and gets "yes" wrong,
-          // while nothing is dropped here that the timeline had not already
-          // placed before the tutor spoke — and a figure, or the very message
-          // the tutor logged as the answer, pulls it straight back in. A
-          // student who volunteers the answer before being asked keeps it.
-          const elsewhere =
-            (i < cut || inDetour) && !isResponse && !slotTokens(m).some(isFigure);
-          const k =
-            isResponse ||
-            (!elsewhere && !detourAsked.has(normMsg(m)) && !isFillerMessage(m));
-          if (k) from.push(i + 1);
-          return k;
-        });
-        return { keep, from };
-      };
-      // Fail open, and fail to what this file already does. If a narrowing
-      // leaves the note with nothing of theirs to quote, verbatimFill falls
-      // back to student_response — the MODEL's wording in the keepsake, which
-      // is what every check on this page exists to prevent. So both
-      // narrowings give way, the newest one first, before that can happen.
-      // Quote too much instead.
-      let noteCut = preAsk;
-      let chosen = quoteSet(noteCut, true);
-      if (!chosen.keep.length && noteCut > 0) chosen = quoteSet((noteCut = 0), true);
-      if (!chosen.keep.length && detourSpans.length) chosen = quoteSet(noteCut, false);
+      // The selection itself lives in lib/verbatim.ts, where a test can run
+      // it: which messages the note quotes, the boundary-drops-content-rescues
+      // asymmetry, and the fail-open cascade that gives both narrowings up
+      // rather than let the note fall through to the MODEL's wording.
+      const chosen = chooseQuotedWithFallback({
+        said,
+        response,
+        cut: preAsk,
+        detourSpans,
+        detourAsked,
+        dropDetours: true,
+      });
+      const noteCut = chosen.cutUsed;
       const { keep: answerish, from: quotedFrom } = chosen;
       const verbatimFill = answerish.length
         ? answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ")
@@ -4646,39 +4305,36 @@ export default function (pi: ExtensionAPI) {
       // that is a near-copy of something they typed is replaced with what
       // they actually typed; a quote of three words or more that matches
       // nothing they said is refused, like any other invented content.
+      // A model-filled slot describes a picture, so its prose is the tutor's.
+      // Anything it puts in QUOTATION MARKS is still the student's. The
+      // matching lives in lib/verbatim.ts (repairQuotes) so it can be run:
+      // a near-copy is replaced with what they actually typed, and a quote of
+      // three words or more that matches nothing they said is reported.
+      //
+      // The SAME pool the sibling drift check uses. Comparing against `said`
+      // alone accused a student of inventing their own picker answer — a
+      // choice never reaches the transcript — and that is the second time
+      // this file has learned it: two refusals mid-lesson, then a false
+      // "⚠ Quoting check" on the notebook they submit.
       const quotesSnapped: string[] = [];
       const quotesInvented: string[] = [];
-      const fixQuotes = (fill: string): string =>
-        fill.replace(/[\u201C"]([^\u201D"]{4,})[\u201D"]/g, (whole, inner: string) => {
-          const text = inner.trim();
-          let best = "";
-          let score = 0;
-          // The SAME pool the sibling drift check uses. Comparing against
-          // `said` alone accused a student of inventing their own picker
-          // answer — a choice never reaches the transcript — and that is the
-          // second time this file has learned it: two refusals mid-lesson,
-          // then a false "⚠ Quoting check" on the notebook they submit.
-          for (const msg of pool) {
-            const d = bigramDice(text, msg);
-            if (d > score) {
-              score = d;
-              best = msg;
-            }
-          }
-          if (score >= 0.8 && best && normMsg(best) !== normMsg(text)) {
-            quotesSnapped.push(text);
-            return `\u201C${best}\u201D`;
-          }
-          // Short quotes are labels and readings ("2.07", "long"), not speech.
-          if (score < 0.5 && text.split(/\s+/).filter(Boolean).length >= 3) {
-            quotesInvented.push(text);
-          }
-          return whole;
-        });
+      const fixQuotes = (fill: string): string => {
+        const r = repairQuotes(fill, pool);
+        quotesSnapped.push(...r.snapped);
+        quotesInvented.push(...r.invented);
+        return r.text;
+      };
       const filledSlots = markers.map((m, i) =>
         /verbatim/i.test(m) ? verbatimFill : fixQuotes(modelFill(i)),
       );
       const problems: string[] = [];
+      // The two halves of the same finding, split by what they do to the
+      // record. `problems` is invention — a figure or a sentence the student
+      // never produced, attributed to them — which makes the row FALSE, so
+      // it is refused (twice, then logged with the flag). `notices` is a
+      // record that is true and merely less good; it goes straight onto the
+      // row and never stops a checkpoint closing. See REVIEWING.md.
+      const notices: string[] = [];
       // Stand down on the STUDENT-derived half only. `pool` also carries the
       // tutor's own question, which is never empty, so gating on it made this
       // check fire on a photo checkpoint where the student had typed nothing
@@ -4724,11 +4380,22 @@ export default function (pi: ExtensionAPI) {
       // Only the slots the model fills. Demanding one for a «verbatim» slot
       // refused an honest call over a string the renderer throws away.
       const filled = modelSlotIdx.filter((i) => modelFill(i).trim()).length;
-      // Not gated on markers.length: cp2_paperwork and cp4_shortcut_drawing
-      // have exactly one marker and it is the model's, and it IS the keepsake
-      // on those two — omitting it rendered "> **My cable:** done, sent it"
-      // with no nudge at all.
-      if (modelSlotIdx.length > 0 && filled < modelSlotIdx.length && slotStrikes < 2) {
+      // Not gated on markers.length: a photo checkpoint's described slot IS
+      // the keepsake on that checkpoint, and omitting it rendered
+      // "> **My cable:** done, sent it" with no nudge at all.
+      //
+      // This one stays a REFUSAL, and it is worth saying why while the file
+      // is demoting its neighbours. An unfilled slot does not leave the note
+      // thinner; it prints "*(not answered)*" under a heading that says **My
+      // cable**, in a notebook the student hands in — a sentence asserting
+      // they did not answer a question they did answer. That is the record
+      // being false, not the record being less good.
+      if (
+        modelSlotIdx.length > 0 &&
+        filled < modelSlotIdx.length &&
+        slotStrikes < 2 &&
+        !refereeWaiverActive()
+      ) {
         slotDriftWarned.set(`${id}:slots`, slotStrikes + 1);
         return toResult({
           out:
@@ -4753,10 +4420,20 @@ export default function (pi: ExtensionAPI) {
       // showed it: answered entirely through the picker, its reveal asks
       // one typed follow-up, and when the tutor jumped straight to
       // checkpoint_done the slot fell back to student_response and the
-      // notebook read "**My guess:** about 60 — about 60". Photo and
-      // drawing checkpoints are exempt by construction: their slots are
-      // deliberately not marked «verbatim».
-      if (said.length === 0 && markers.some((m) => /verbatim/i.test(m))) {
+      // notebook read "**My guess:** about 60 — about 60".
+      //
+      // Photo and drawing checkpoints used to be exempt by construction:
+      // their slots carried no «verbatim» marker at all, because one slot was
+      // asked to describe the picture AND quote the reasoning in the same
+      // breath. That is the compound slot ops#15 caught — the tutor cannot
+      // follow "quote my reasoning word for word" when half the slot has to
+      // be described, and it rewrote the student's opening clause to make one
+      // fluent sentence. Those skeletons are split now (a described slot and
+      // a «verbatim» one), so the exemption has to be stated rather than
+      // implied: when the page IS the answer and it arrived, nothing typed is
+      // not a skipped question.
+      const photoAnswered = wantPhotos.length > 0 && !photoMissing;
+      if (said.length === 0 && !photoAnswered && markers.some((m) => /verbatim/i.test(m))) {
         problems.push(
           `this checkpoint's note quotes the student's own words, but they have not ` +
             `typed anything here yet — ask them the question your script's reveal_after ` +
@@ -4787,7 +4464,7 @@ export default function (pi: ExtensionAPI) {
           response = snapped;
         }
         const d = slotDrift(response, pool);
-        if (d.numbers.length > 0 || d.words.length >= 3) {
+        if (driftIsReportable(d)) {
           problems.push(
             `student_response ("${response.slice(0, 80)}") adds ` +
               [...d.numbers, ...d.words].map((t) => `"${t}"`).join(", "),
@@ -4846,7 +4523,7 @@ export default function (pi: ExtensionAPI) {
         if (said.length === 0) break;
         const fill = modelFill(i);
         const d = slotDrift(fill, pool);
-        if (d.numbers.length === 0 && d.words.length < 3) continue;
+        if (!driftIsReportable(d)) continue;
         problems.push(
           `note slot ${i + 1} ("${fill.slice(0, 80)}") adds ` +
             [...d.numbers, ...d.words].map((t) => `"${t}"`).join(", "),
@@ -4871,7 +4548,7 @@ export default function (pi: ExtensionAPI) {
           .trim();
         if (quoted) {
           const d = slotDrift(quoted, pool);
-          if (d.numbers.length > 0 || d.words.length >= 3) {
+          if (driftIsReportable(d)) {
             problems.push(
               `the quote in note_markdown ("${quoted.slice(0, 80)}") adds ` +
                 [...d.numbers, ...d.words].map((t) => `"${t}"`).join(", ") +
@@ -4883,36 +4560,25 @@ export default function (pi: ExtensionAPI) {
           // that way: they typed "6 choose 2 is 15, and the outer friends each
           // only have 1 friend so they cant center any" and the note quoted
           // "6 choose 2 is 15" — the arithmetic kept, the thinking dropped, on
-          // a checkpoint whose whole point was the thinking. Nothing was
-          // added, so nothing fired.
+          // a checkpoint whose whole point was the thinking.
           //
-          // Only a segment that is the OPENING of a message they typed counts.
-          // Quoting some of their turns and not others is what the skeleton
-          // path does on purpose; cutting one of them in half is not.
-          for (const seg of quoted.split("·").map((s) => s.trim().replace(/^"|"$/g, ""))) {
-            const segN = normMsg(seg);
-            if (segN.split(" ").length < 2) continue;
-            // A quote that IS one of their messages is right by definition,
-            // even when a later one opens with the same words. Students
-            // elaborate: "i think its 2", then "i think its 2 because they
-            // are neighbours on the ring". Without this, quoting the first
-            // one exactly and correctly is refused for being a truncation of
-            // the second. Verified against both shapes before shipping.
-            if (said.some((m) => normMsg(m) === segN)) continue;
-            const whole = said.find((m) => {
-              const mN = normMsg(m);
-              return mN.startsWith(segN) && mN.length > segN.length;
-            });
-            if (!whole) continue;
-            const dropped = normMsg(whole).split(" ").length - segN.split(" ").length;
-            if (dropped >= 4) {
-              problems.push(
-                `the quote "${seg.slice(0, 60)}…" stops partway through what they ` +
-                  `typed — they went on "…${normMsg(whole).slice(segN.length).trim().slice(0, 60)}". ` +
-                  `Quote the whole message, or quote a different one`,
-              );
-              break;
-            }
+          // RECORDED, not refused, and that is the line this file now draws:
+          // a quote that ADDS words the student never said attributes a
+          // sentence to them, which makes the record false; a quote that
+          // stops early is accurate as far as it goes and merely less
+          // complete. This check refused a CORRECT quote twice within two
+          // hours of being written (fd45061, then 08a6620) for exactly the
+          // shape it cannot tell apart — a student elaborating on their own
+          // earlier message. It now says so on the row instead, beside
+          // note_skipped_msgs, which already numbers what the note passed
+          // over. lib/verbatim.ts holds the comparison, with both shapes
+          // under test.
+          const cutShort = truncatedQuote(quoted, said);
+          if (cutShort) {
+            notices.push(
+              `the quote "${cutShort.segment.slice(0, 60)}…" stops partway through what ` +
+                `they typed — they went on "…${cutShort.rest.slice(0, 60)}"`,
+            );
           }
         }
       }
@@ -4921,7 +4587,7 @@ export default function (pi: ExtensionAPI) {
       // flagged for the grader: a model that cannot satisfy the check must
       // never be able to strand the student mid-lesson.
       const strikes = slotDriftWarned.get(id) ?? 0;
-      if (problems.length > 0 && strikes < 2 && said.length === 0) {
+      if (problems.length > 0 && strikes < 2 && said.length === 0 && !refereeWaiverActive()) {
         slotDriftWarned.set(id, strikes + 1);
         return toResult({
           out:
@@ -4933,7 +4599,7 @@ export default function (pi: ExtensionAPI) {
           failed: false,
         });
       }
-      if (problems.length > 0 && strikes < 2) {
+      if (problems.length > 0 && strikes < 2 && !refereeWaiverActive()) {
         slotDriftWarned.set(id, strikes + 1);
         return toResult({
           out:
@@ -4990,7 +4656,8 @@ export default function (pi: ExtensionAPI) {
         (turnsInCheckpoint >= STUCK_TURNS || moreAnswersThanQuestions) &&
         Math.round(Number(params.hints_used ?? 0) || 0) === 0 &&
         judgment !== "prediction" &&
-        lateStrikes < 1
+        lateStrikes < 1 &&
+        !refereeWaiverActive()
       ) {
         lateCloseWarned.set(id, lateStrikes + 1);
         return toResult({
@@ -5077,8 +4744,17 @@ export default function (pi: ExtensionAPI) {
       // row that logs it. Taken after, the field is 0 on every checkpoint ever
       // closed — which is worse than not having it: a grader reads "0 turns"
       // beside "0 hints" and concludes the student needed neither.
-      const turnsTaken = turnsInCheckpoint;
-      turnsInCheckpoint = 0; // a closed checkpoint is not a stuck one
+      //
+      // +1, and -1 rather than 0, because turn_end has not run yet. The
+      // counter holds turns COMPLETED since this checkpoint opened; the turn
+      // this close is happening in is one more, and it belongs to THIS
+      // checkpoint. Resetting to 0 handed that same turn to the NEXT one:
+      // every checkpoint started at 1, so the ⚖️ stuck nudge fired at eleven
+      // turns rather than twelve and the late-close gate counted a turn the
+      // student had not taken yet. -1 lets turn_end's increment land on 0
+      // where the next checkpoint actually begins.
+      const turnsTaken = turnsInCheckpoint + 1;
+      turnsInCheckpoint = -1; // turn_end brings it to 0; a closed checkpoint is not a stuck one
       const logged = appendLog({
         type: "checkpoint",
         id,
@@ -5133,6 +4809,11 @@ export default function (pi: ExtensionAPI) {
         ...(noteCut > 0 ? { note_window_from_msg: noteCut + 1 } : {}),
         ...(figuresDropped.length ? { figures_not_quoted: figuresDropped } : {}),
         ...(problems.length > 0 ? { verbatim_drift: problems } : {}),
+        // The record is true and less good. Deliberately NOT verbatim_drift:
+        // buildSessionRecord prints "⚠ Quoting check" into the notebook the
+        // STUDENT submits off that field, and a warning on their keepsake is
+        // not the right answer to a quote that was accurate but short.
+        ...(notices.length > 0 ? { note_quotes_short: notices } : {}),
       });
 
       const suppressed = noteSuppressed(id);
@@ -6418,12 +6099,31 @@ export default function (pi: ExtensionAPI) {
             // a parked note belongs to the session just archived
           }
           buildOrderWarned.clear();
+          lateCloseWarned.clear();
           paceUnasked.clear();
           resumeGaps.clear();
           viewedPhotos.clear();
           // Same rewind for the transcript mark: without it, whatever the
           // student typed before choosing "start fresh" is filed as the new
           // cp0's own words.
+          //
+          // The detour marks go with it, in this order and for the same
+          // reason checkpoint_done clears them in the same block that moves
+          // the mark: detourSpans holds INDICES into the window studentSaidSince
+          // is about to discard. Left behind, they point at whatever the new
+          // session's first checkpoint puts in those slots — the student's own
+          // answers, dropped out of their first note cell. checkpoint_done has
+          // cleared these since the spans were introduced; this path never did,
+          // and it is the same bug shape as the three that shipped: a read of
+          // mutable state across a boundary, on a path no boot test reaches.
+          detourAsked.clear();
+          detourSpans.length = 0;
+          // A fresh start is turn one of a new session. Carrying the abandoned
+          // run's count forward can trip the no-hints late-close gate on the
+          // very first checkpoint, and puts a number on its row that belongs
+          // to a lesson the student chose to throw away. -1 for the same
+          // reason as the other two resets: turn_end has not run yet.
+          turnsInCheckpoint = -1;
           studentSaidSince(ctx, true);
           pi.sendMessage(
             {

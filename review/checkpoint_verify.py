@@ -12,6 +12,15 @@ Reads the sandbox named in the state file and prints, in one screen:
   LOG      the checkpoint's row, with the flags the extension stamps on a row
            it had to repair or give up on (build_missing, photo_missing,
            verbatim_drift, id_snapped_from, note_skipped_msgs, …)
+
+           Two of these mean different things and are easy to confuse.
+           `verbatim_drift` is INVENTION — words attributed to the student
+           that they never produced — and the extension refuses the close
+           twice before it lands. `note_quotes_short` and
+           `closed_without_speaking` are records that are TRUE and less
+           good; nothing was refused, and they are here because the row
+           should say what happened, not because anything went wrong with
+           the student's work.
   EXTRA    named cells the tutor added that the script never asked for — a
            souvenir cell for a detour is the good case, a stray heading is not
 
@@ -149,6 +158,8 @@ def main():
                 "id_snapped_from",
                 "response_retyped_as",
                 "slot_quotes_repaired",
+                "note_quotes_msgs",
+                "note_quotes_short",
                 "note_skipped_msgs",
                 "note_window_from_msg",
                 "turns_in_checkpoint",

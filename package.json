@@ -21,6 +21,15 @@
     "url": "https://github.com/skojaku/pi-pair-notebook/issues"
   },
   "type": "module",
+  "//scripts": [
+    "node --test needs no dependencies and no build step: node 24 strips the",
+    "types itself, and extensions/lib/*.ts is written to be importable by both",
+    "the test runner and pi's own loader (jiti). `npm test` from a fresh clone",
+    "works with an empty node_modules."
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "extensions/",
     "setup/",
