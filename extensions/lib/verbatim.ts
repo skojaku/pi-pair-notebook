@@ -89,10 +89,19 @@ const ACK_WORDS = new Set(
     // be nice" — is not the student's work, and a live run left it sitting in
     // the note between two real answers. `yes` and `no` stay OUT: they can be
     // the answer to a lesson question.
-    // `this`, `that`, `one` are NOT here: "this one", answering "which of the
-    // two worlds do you live in?", is half an answer, and adding them deleted
-    // it from the keepsake while the student's reason survived.
-    "would could should will do does did a an the be is are quick note maybe bit little")
+    // `this` and `one` are NOT here: "this one", answering "which of the two
+    // worlds do you live in?", is half an answer, and adding them deleted it
+    // from the keepsake while the student's reason survived.
+    //
+    // `that` IS here, and the pair above is why it is safe. Every word must be
+    // an acknowledgement for a message to be dropped, so "this one", "that
+    // one" and "thats the one" all survive on the strength of the word beside
+    // it. What "that" buys is the shape a gate run produced on 2026-08-27:
+    // "yep that makes sense, lets keep going", the student closing a detour,
+    // quoted in the NEXT checkpoint's note under "I worked out". detourSpans
+    // cannot reach that one — the span is closed when log_detour runs and this
+    // came after it — and every other word in it was already an ack.
+    "would could should will do does did a an the be is are quick note maybe bit little that")
     .split(" "),
 );
 
@@ -566,4 +575,35 @@ export function matchDetourQuestion(question: string, said: string[]): DetourMat
  */
 export function scriptedQuestionCount(askBlock: string): number {
   return (askBlock.match(/^\s*\d+[a-z]?\.\s/gm) ?? []).length;
+}
+
+/**
+ * What a «verbatim» slot renders when the student typed nothing at all.
+ *
+ * Normally that cannot happen: a skeleton only asks for their words where a
+ * question was put to them, and `checkpoint_done` refuses a close that quotes
+ * words nobody typed. The exception is a paper checkpoint whose PHOTO
+ * arrived — the page was the answer, and refusing there would be refusing an
+ * honest record.
+ *
+ * The fallback used to be `student_response` in every case, and on that one
+ * path it put the model's own stage direction inside a fold labelled as the
+ * student's words. From a gate run on 2026-08-27, in cp2_paperwork's "My
+ * work":
+ *
+ *     > (photo of hand-worked table: 5-ring, all 10 pairs, sum 15, average 1.5)
+ *
+ * Nobody said that. It is a sentence the model wrote for the log's headline
+ * field, and the row still carries it there, where it belongs. What the fold
+ * says now is what actually happened.
+ */
+export function verbatimFill(
+  answerish: string[],
+  response: string,
+  opts: { photoAnswered?: boolean } = {},
+): string {
+  if (answerish.length) {
+    return answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ");
+  }
+  return opts.photoAnswered ? "*(answered on paper — the photo is above)*" : response;
 }

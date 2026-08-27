@@ -57,6 +57,7 @@ import {
   snapToTranscript,
   scriptedQuestionCount,
   snapCheckpointId as snapIdAgainst,
+  verbatimFill,
   truncatedQuote,
   withQuotedQuestion,
 } from "./lib/verbatim.ts";
@@ -4088,6 +4089,12 @@ export default function (pi: ExtensionAPI) {
       const photoMissing =
         wantPhotos.length > 0 &&
         !wantPhotos.some((w) => viewedPhotos.has(w) || uploadedOnDisk(w));
+      // The page WAS the answer, and it arrived. Declared here beside what it
+      // is derived from rather than beside its first use: read from the note
+      // rendering ~170 lines below, and a const read above its own
+      // declaration is the temporal-dead-zone shape that made every
+      // checkpoint unclosable once already.
+      const photoAnswered = wantPhotos.length > 0 && !photoMissing;
       // Did they say ANYTHING about a camera at THIS checkpoint? A live run
       // carried "camera's broken" forward from cp2_paperwork and opened cp4
       // with "well, thinking time, since your camera's still out" — the page
@@ -4231,9 +4238,7 @@ export default function (pi: ExtensionAPI) {
       });
       const noteCut = chosen.cutUsed;
       const { keep: answerish, from: quotedFrom } = chosen;
-      const verbatimFill = answerish.length
-        ? answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ")
-        : response;
+      const filledVerbatim = verbatimFill(answerish, response, { photoAnswered });
       // The model is asked for the OTHER slots only — the ones whose answer
       // was a drawing, a photo or a picker, which no transcript holds. It may
       // still send a fill per slot positionally (older habit, and what the
@@ -4293,7 +4298,7 @@ export default function (pi: ExtensionAPI) {
         return r.text;
       };
       const filledSlots = markers.map((m, i) =>
-        /verbatim/i.test(m) ? verbatimFill : fixQuotes(modelFill(i)),
+        /verbatim/i.test(m) ? filledVerbatim : fixQuotes(modelFill(i)),
       );
       const problems: string[] = [];
       // The two halves of the same finding, split by what they do to the
@@ -4400,7 +4405,6 @@ export default function (pi: ExtensionAPI) {
       // a «verbatim» one), so the exemption has to be stated rather than
       // implied: when the page IS the answer and it arrived, nothing typed is
       // not a skipped question.
-      const photoAnswered = wantPhotos.length > 0 && !photoMissing;
       if (said.length === 0 && !photoAnswered && markers.some((m) => /verbatim/i.test(m))) {
         problems.push(
           `this checkpoint's note quotes the student's own words, but they have not ` +

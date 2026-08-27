@@ -29,6 +29,7 @@ import {
   snapCheckpointId,
   snapToTranscript,
   truncatedQuote,
+  verbatimFill,
   withQuotedQuestion,
 } from "../extensions/lib/verbatim.ts";
 
@@ -444,4 +445,51 @@ test("an ask block that numbers nothing switches the check off", () => {
 
 test("a decimal in the prose is not a question number", () => {
   assert.equal(scriptedQuestionCount("The average was 1.17 over all six pairs."), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Found by the Part D gate run of 2026-08-27
+// ---------------------------------------------------------------------------
+
+test("closing a detour is not the next checkpoint's worked answer", () => {
+  // From the run: the student asked a question mid-lesson, the tutor answered
+  // it and called log_detour, then asked "Ready to keep going?" — and the
+  // student's "yep that makes sense, lets keep going" was quoted in
+  // cp2_diameter's note under "I worked out", beside their real answer.
+  //
+  // detourSpans cannot reach it: the span is closed at log_detour time, and
+  // this message came after. It is the same shape as the cp1_routing failure
+  // ACK_WORDS was grown for — a whole turn answering the tutor's own offer —
+  // and the only word in it that was not already an acknowledgement is "that".
+  assert.equal(isFillerMessage("yep that makes sense, lets keep going"), true);
+});
+
+test("adding 'that' does not swallow the answers ACK_WORDS was burned on", () => {
+  // The comment on ACK_WORDS records `this`/`that`/`one` being added once and
+  // deleting half a real answer: "this one", answering "which of the two
+  // worlds do you live in?". Every word must be an acknowledgement for a
+  // message to be dropped, and `one` and `this` stay out, so these survive.
+  assert.equal(isFillerMessage("this one"), false);
+  assert.equal(isFillerMessage("that one"), false);
+  assert.equal(isFillerMessage("thats the one"), false);
+  assert.equal(isFillerMessage("that world"), false);
+});
+
+test("a photo-only checkpoint does not put the model's words in their fold", () => {
+  // cp2_paperwork, from the same run: the student uploaded a page and typed
+  // nothing, so the «verbatim» slot fell through to student_response — a
+  // parenthetical the MODEL wrote — inside a fold headed "My work".
+  const response = "(photo of hand-worked table: 5-ring, all 10 pairs, sum 15, average 1.5)";
+  assert.equal(verbatimFill([], response, { photoAnswered: true }), "*(answered on paper — the photo is above)*");
+});
+
+test("with nothing typed and no photo, the fallback is unchanged", () => {
+  assert.equal(verbatimFill([], "their answer", {}), "their answer");
+});
+
+test("anything they typed still wins", () => {
+  assert.equal(
+    verbatimFill(["i put it there because"], "x", { photoAnswered: true }),
+    '"i put it there because"',
+  );
 });
