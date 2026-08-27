@@ -40,10 +40,19 @@ every module in the file:
 | the tag exists on the remote | a pin pi cannot resolve kills pi with a raw Node stack trace **before any extension loads** — nothing in this package could repair it |
 | `package.json` version at that tag equals the tag | tag and manifest disagreeing is how the wrong code ships under the right name |
 | every file in `REQUIRED` is present at that tag | a manifest entry pointing at a missing file is silently dropped: the extension ceases to exist and pi still exits 0 |
-| pi boots that tag with the extension **loaded** | exit 0 alone proves nothing, for the reason above — the gate asserts a named tool is present |
+| pi boots that tag with the extension **loaded** | exit 0 alone proves nothing, for the reason above — the gate asserts the `--loaded--<tag>` marker the factory writes, on disk, and greps the boot log for "Failed to load extension" |
 | the tag is not behind what `release` already advertises | stops a stale branch walking students backwards |
 
 Only then does the workflow copy `channel.json` onto `release`.
+
+**What none of that proves.** The gate boots the extension with an empty
+`lesson/index.json` and a dead `MARIMO_URL`, so it reaches the factory and
+`session_start` and stops. Every tool, guard, drift check and log field is
+behind a call it never makes. A tag can pass every row of that table and still
+be wrong in every row it writes — three bugs did exactly that in one afternoon,
+health markers and all. This gate answers "will this tag brick a launch?".
+"Is this tag fit for a student?" is answered by `npm test` and by Part D in the
+course repo's `REVIEWING.md`, before the tag is cut.
 
 `channel-watch` re-runs the same checks against the **live** `release` file on a
 schedule, because a tag can be deleted long after it was promoted.
