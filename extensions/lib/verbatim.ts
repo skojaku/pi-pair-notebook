@@ -553,3 +553,17 @@ export function matchDetourQuestion(question: string, said: string[]): DetourMat
     isDetour,
   };
 }
+
+/**
+ * How many questions a checkpoint's `ask:` block asks, counted from its own
+ * numbered list. Zero when the block does not number them, which switches the
+ * check that uses this OFF rather than guessing.
+ *
+ * "2b." counts as its own question. A script that splits a step in two — ask,
+ * then invite the self-check box in the student's own beat — asks one more
+ * thing than its top-level numbering says, and the late-close gate compares
+ * this number against how many messages the student sent.
+ */
+export function scriptedQuestionCount(askBlock: string): number {
+  return (askBlock.match(/^\s*\d+[a-z]?\.\s/gm) ?? []).length;
+}

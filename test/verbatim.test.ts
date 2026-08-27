@@ -22,6 +22,7 @@ import {
   matchDetourQuestion,
   normMsg,
   repairQuotes,
+  scriptedQuestionCount,
   slotDrift,
   slotMarkers,
   slotTokens,
@@ -415,4 +416,32 @@ test("nothing matches an empty transcript", () => {
     question: "why?",
     isDetour: false,
   });
+});
+
+// ---------------------------------------------------------------------------
+// scriptedQuestionCount
+// ---------------------------------------------------------------------------
+
+test("a lettered sub-step is its own question", () => {
+  // A script that splits a step in two — ask, then invite the self-check box
+  // in the student's own beat — asks one more thing than its top-level
+  // numbering says. The late-close gate compares this against how many
+  // messages the student sent, so a miscount nudges a tutor that did exactly
+  // what the script asked.
+  const ask = [
+    '      1. "Set k to 2. Can two of node 0\'s friends ever know each other?"',
+    '      2. "Now set k to 4. Which friendships ALREADY exist?"',
+    "      2b. Only once they have committed to a number: \"Now tick 'check my",
+    '         count\'. Does it agree with you?"',
+    '      3. "So node 0\'s clustering at k=4 is...?"',
+  ].join("\n");
+  assert.equal(scriptedQuestionCount(ask), 4);
+});
+
+test("an ask block that numbers nothing switches the check off", () => {
+  assert.equal(scriptedQuestionCount("Ask them where the cable goes, and why."), 0);
+});
+
+test("a decimal in the prose is not a question number", () => {
+  assert.equal(scriptedQuestionCount("The average was 1.17 over all six pairs."), 0);
 });

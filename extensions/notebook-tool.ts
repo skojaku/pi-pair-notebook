@@ -55,6 +55,7 @@ import {
   SLOT_GLUE,
   slotTokens,
   snapToTranscript,
+  scriptedQuestionCount,
   snapCheckpointId as snapIdAgainst,
   truncatedQuote,
   withQuotedQuestion,
@@ -2370,14 +2371,8 @@ function scriptedPhotoCells(cpId: string): string[] {
  * not number them, which switches the check that uses this off rather than
  * guessing.
  */
-function scriptedQuestionCount(cpId: string): number {
-  // "2b." counts as its own question. A script that splits a step in two —
-  // ask, then invite the self-check box in the student's own beat — asks one
-  // more thing than its top-level numbering says, and the late-close gate
-  // compares this number against how many messages the student sent. Without
-  // the optional letter it reads a sub-step as an unexplained extra answer
-  // and nudges a tutor that did exactly what the script asked.
-  return (checkpointBlock(cpId, "ask").match(/^\s*\d+[a-z]?\.\s/gm) ?? []).length;
+function scriptedQuestionCountFor(cpId: string): number {
+  return scriptedQuestionCount(checkpointBlock(cpId, "ask"));
 }
 
 /**
@@ -4649,7 +4644,7 @@ export default function (pi: ExtensionAPI) {
       // `ask` block that numbers its questions, a multi-part answer typed as
       // two messages costs one extra tool call and nothing else, and the
       // nudge says so.
-      const qCount = scriptedQuestionCount(baseCheckpointId(id));
+      const qCount = scriptedQuestionCountFor(baseCheckpointId(id));
       const moreAnswersThanQuestions = qCount > 0 && said.length > qCount;
       const lateStrikes = lateCloseWarned.get(id) ?? 0;
       if (
