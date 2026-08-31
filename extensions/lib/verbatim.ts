@@ -486,7 +486,17 @@ export const ASKED_LINE = /^[ \t]*>?[ \t]*🧭[ \t]*\*\*You asked:?\*\*/;
  * marker plus its quoted span removes only text that provably contains no
  * delimiter, wherever on the line it sits.
  */
-const ASKED_SEGMENT = />?[ \t]*🧭[ \t]*\*\*You asked:?\*\*[ \t]*[“"]([^”"]*)[”"][ \t]*/g;
+// The compass and the bold are OPTIONAL, because the model does not use them.
+// A live run wrote its souvenir quote as `You asked: *"…"*` — no 🧭, emphasis
+// instead of bold — and a pattern anchored on the toolkit's own marker walks
+// straight past it. That one was verbatim and harmless; the same shape with a
+// composed question is the Blocker this exists to stop.
+//
+// Widening is safe in the one direction that matters: nothing is removed
+// unless the quoted text is absent from everything the student typed or
+// picked, so an ordinary sentence quoting them back keeps its quote.
+const ASKED_SEGMENT =
+  />?[ \t]*(?:🧭[ \t]*)?(?:\*\*|__)?You asked:?(?:\*\*|__)?[ \t]*[*_]*[“"]([^”"]*)[”"][*_]*[ \t]*/gi;
 
 /**
  * Take a **You asked** line the MODEL wrote out of a cell body before that

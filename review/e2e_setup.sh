@@ -291,8 +291,31 @@ ENVS=(--env "TUTOR_VISION_MODEL=${TUTOR_VISION_MODEL:-netsci/vision}"
 # which on a reviewer's machine is whatever workspace they were not looking at
 # — a live session running unwatched in another window is the one thing a gate
 # run must not be. E2E_HERDR_WORKSPACE puts it beside the work it is testing.
+#
+# `herdr agent start --workspace` takes an ID (`w1D`), not the LABEL a reviewer
+# reads off their own screen ("pair-notebook") — and it fails with
+# `agent_placement_not_found` AFTER the sandbox is built and the toolkit banner
+# is printed, which reads like the toolkit is broken rather than the flag. Take
+# either: resolve a label through `herdr workspace list`, and pass anything
+# unrecognised straight through so a future herdr that accepts more still works.
 PANE_ARGS=(--cwd "$SANDBOX" --no-focus)
-[ -n "${E2E_HERDR_WORKSPACE:-}" ] && PANE_ARGS+=(--workspace "$E2E_HERDR_WORKSPACE")
+if [ -n "${E2E_HERDR_WORKSPACE:-}" ]; then
+  WS=$(herdr workspace list 2>/dev/null | python3 -c "
+import json, sys
+want = sys.argv[1]
+try:
+    ws = json.load(sys.stdin)['result']['workspaces']
+except Exception:
+    ws = []
+for w in ws:
+    if w.get('label') == want or w.get('workspace_id') == want:
+        print(w['workspace_id'])
+        break
+else:
+    print(want)
+" "$E2E_HERDR_WORKSPACE" 2>/dev/null || echo "$E2E_HERDR_WORKSPACE")
+  PANE_ARGS+=(--workspace "$WS")
+fi
 
 herdr agent start "$AGENT" "${PANE_ARGS[@]}" \
   "${ENVS[@]}" \

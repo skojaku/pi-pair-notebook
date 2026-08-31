@@ -918,3 +918,23 @@ test("with no address of our own, nothing is rewritten", () => {
   const t = "run marimo edit notebook.py";
   assert.deepEqual(rewriteRivalServer(t, ""), { text: t, hits: [] });
 });
+
+test("the model's own wording of the quote line is caught too", () => {
+  // From a live run: the tutor wrote its souvenir quote as `You asked: *"…"*`
+  // — no 🧭, emphasis instead of bold. A pattern anchored on the toolkit's own
+  // marker walks straight past it, and that is the door the Blocker uses.
+  const code = 'mo.md(r"""### Detour\n\nYou asked: *"so three visits total?"*\n\nHere is why.""")';
+  const r = stripUnbackedAskedLines(code, ["need all to have even degree"]);
+  assert.deepEqual(r.removed, ["so three visits total?"]);
+  assert.ok(!r.code.includes("so three visits total"));
+  assert.ok(r.code.includes("Here is why."));
+});
+
+test("the same line, when they really said it, is left alone", () => {
+  // The exact souvenir a live run produced. Widening the pattern must not
+  // start deleting honest quotes.
+  const said = ["whats the difference between a trail and a circuit? i keep mixing them up"];
+  const code =
+    'mo.md(r"""### Detour: trail vs circuit\n\nYou asked: *"whats the difference between a trail and a circuit? i keep mixing them up"*\n\n- A **trail** is a walk…""")';
+  assert.deepEqual(stripUnbackedAskedLines(code, said), { code, removed: [] });
+});
