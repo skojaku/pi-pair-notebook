@@ -62,7 +62,7 @@ import {
   snapCheckpointId as snapIdAgainst,
   souvenirVerdict,
   STUCK_ANSWERS,
-  stripUnbackedAskedLines,
+  stripModelQuoteLines,
   verbatimFill,
   truncatedQuote,
   withQuotedQuestion,
@@ -5822,7 +5822,7 @@ export default function (pi: ExtensionAPI) {
         // the markdown already "quotes the question", so a souvenir_markdown
         // that arrives with the model's own **You asked** line in it would sail
         // straight through the check above and into the notebook.
-        const clean = stripUnbackedAskedLines(md0, backingPool).code;
+        const clean = stripModelQuoteLines(md0).code;
         const md = questionBacked ? withQuotedQuestion(clean, snappedQ, question) : clean;
         const slug = sanitize(question.toLowerCase().split(/\s+/).slice(0, 4).join("_")).slice(
           0,
@@ -5940,21 +5940,14 @@ export default function (pi: ExtensionAPI) {
         `    _cid = ctx.create_cell(_code, name=${py(name)}, hide_code=${hide})\n` +
         `    ctx.run_cell(_cid)\n`;
       inner += focusCellCode("_cid", "    ");
-      // ── A quote the student never said, arriving by the other door ───────
-      // `> 🧭 **You asked:** “…”` is this toolkit's own marker: log_detour puts
-      // it in, with the student's bytes, and its bounce text no longer shows
-      // the model how. A cell that arrives carrying one anyway is the second
-      // route into the same Blocker — a fabricated sentence in the keepsake,
-      // attributed to the student — and it defeats log_detour's check, because
-      // a cell that already "quotes the question" is left alone.
-      //
-      // Whole lines only, never a line holding a string delimiter, and never
-      // when the transcript is empty. Recoverable if it ever gets this wrong:
-      // log_detour puts the BACKED quote back on the next call.
-      const cellQuotes = stripUnbackedAskedLines(params.code, [
-        ...allStudentMessages(lastCtx),
-        ...pickedTexts(pickedAnswers),
-      ]);
+      // ── The quote line is not the model's to write ───────────────────────
+      // Stripped whether or not the transcript backs it. An unbacked one is
+      // the Blocker in #5; a BACKED one is the fault an m02 run produced, where
+      // the model quoted two thirds of the student's sentence, the extension's
+      // own check found no match for the whole of it, prepended the correct
+      // quote — and the souvenir ended up carrying the question twice, once
+      // whole and once with half of it missing. log_detour adds the right one.
+      const cellQuotes = stripModelQuoteLines(params.code);
       // Improvised cells go through the review (nb_review.py) — it catches the
       // displays marimo would silently drop before the student sees a cell
       // with a missing figure.
@@ -5990,10 +5983,11 @@ export default function (pi: ExtensionAPI) {
       if (!addCellResult.failed) {
         if (cellQuotes.removed.length) {
           addCellResult.out +=
-            `\nNOTE — a "You asked" line was left out of this cell: nothing the student ` +
-            `typed or picked contains ${cellQuotes.removed.map((q) => `“${q}”`).join(", ")}. ` +
-            `That line is the extension's to write, from their own words, and log_detour ` +
-            `adds it. Build the aside itself; do not put words in their mouth.`;
+            `\nNOTE — a "You asked" line was left out of this cell. That line is not ` +
+            `yours to write: log_detour adds it, from the student's own message, whole. ` +
+            `Yours was ${cellQuotes.removed.map((q) => `“${q}”`).join(", ")} — a re-typed ` +
+            `quote loses a clause or tidies their punctuation, and both have happened. ` +
+            `Build the aside itself.`;
         }
         await pinAppealToBottom(signal);
         if (name !== wanted) {
@@ -6588,11 +6582,9 @@ export default function (pi: ExtensionAPI) {
       // The same door as nb_add_cell, and the likelier one for this: the
       // souvenir bounce asks the tutor to rewrite a cell the extension has
       // already quoted, and a rewrite that re-types the quote from memory is
-      // how the student's punctuation got tidied in the first place.
-      const edited = stripUnbackedAskedLines(params.code, [
-        ...allStudentMessages(lastCtx),
-        ...pickedTexts(pickedAnswers),
-      ]);
+      // how the student's punctuation got tidied in the first place — and how
+      // two thirds of their sentence went missing in an m02 run.
+      const edited = stripModelQuoteLines(params.code);
       const code =
         `import marimo._code_mode as cm\n` +
         `async with cm.get_context() as ctx:\n` +
@@ -6606,9 +6598,9 @@ export default function (pi: ExtensionAPI) {
       const editResult = await runKernel(code, signal);
       if (!editResult.failed && edited.removed.length) {
         editResult.out +=
-          `\nNOTE — a "You asked" line was left out: nothing the student typed or picked ` +
-          `contains ${edited.removed.map((q) => `“${q}”`).join(", ")}. That line is the ` +
-          `extension's to write, from their own words.`;
+          `\nNOTE — a "You asked" line was left out: that line is not yours to write, ` +
+          `log_detour adds it from the student's own message. Yours was ` +
+          `${edited.removed.map((q) => `“${q}”`).join(", ")}.`;
       }
       return toResult(editResult);
     },

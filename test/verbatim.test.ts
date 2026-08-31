@@ -30,7 +30,7 @@ import {
   rewriteRivalServer,
   souvenirVerdict,
   STUCK_ANSWERS,
-  stripUnbackedAskedLines,
+  stripModelQuoteLines,
   scriptedQuestionCount,
   slotDrift,
   slotMarkers,
@@ -750,7 +750,7 @@ test("a script normMsg cannot see is not called a fabrication", () => {
 });
 
 // ---------------------------------------------------------------------------
-// stripUnbackedAskedLines — the other door into the same fabrication
+// stripModelQuoteLines — the quote line is not the model's to write
 // ---------------------------------------------------------------------------
 
 test("an unbacked You asked line is taken out of a cell body", () => {
@@ -761,40 +761,53 @@ test("an unbacked You asked line is taken out of a cell body", () => {
     "Here is the idea.",
     '""")',
   ].join("\n");
-  const r = stripUnbackedAskedLines(code, ["need all to have even degree"]);
+  const r = stripModelQuoteLines(code);
   assert.deepEqual(r.removed, ["so three visits total?"]);
   assert.ok(!r.code.includes("You asked"));
   assert.ok(r.code.includes("Here is the idea."));
-  // The literal is still balanced — the delimiters were never touched.
   assert.equal((r.code.match(/"""/g) ?? []).length, 2);
 });
 
-test("a backed You asked line is left exactly where it is", () => {
-  const code = 'mo.md(r"""\n> 🧭 **You asked:** “what is a trail?”\n\nAn answer.\n""")';
-  assert.deepEqual(stripUnbackedAskedLines(code, ["what is a trail?"]), { code, removed: [] });
+test("a BACKED but shortened quote is taken out too", () => {
+  // m02, live. The student typed the whole sentence; the model quoted two
+  // thirds of it. Containment says "backed", so an unbacked-only rule leaves
+  // it — and then the extension finds no match for the full message, prepends
+  // the correct quote, and the souvenir carries the question twice: once
+  // whole, once with "i keep mixing them up" missing.
+  const code =
+    'mo.md(r"""🧭 **Detour**\n\nYou asked: *"whats the difference between an average and a median hop count?"*\n\nFive letters took 2, 3, 4, 4 and 12 hops.""")';
+  const r = stripModelQuoteLines(code);
+  assert.deepEqual(r.removed, ["whats the difference between an average and a median hop count?"]);
+  assert.ok(!r.code.includes("You asked"));
+  assert.ok(r.code.includes("Five letters"));
 });
 
 test("the quote is removed as a SEGMENT, so the delimiters survive", () => {
   // THE shape that matters, and the one a line-based strip cannot touch: the
-  // marker and the closing `"""` share a line. A first version of this refused
-  // any line holding a delimiter — correct in itself, and it meant the guard
-  // never fired on the only shape the model actually writes.
+  // marker and the closing `"""` share a line.
   for (const code of [
     'mo.md(r"""> 🧭 **You asked:** “never said this”""")',
     'mo.vstack([mo.md(r"""> 🧭 **You asked:** “never said this”\n\nthe idea"""), netviz(e)])',
   ]) {
-    const r = stripUnbackedAskedLines(code, ["something else"]);
+    const r = stripModelQuoteLines(code);
     assert.deepEqual(r.removed, ["never said this"]);
     assert.ok(!r.code.includes("You asked"), r.code);
-    // Every delimiter the cell had, it still has.
     assert.equal((r.code.match(/"""/g) ?? []).length, (code.match(/"""/g) ?? []).length);
     assert.ok(r.code.startsWith("mo."), r.code);
   }
 });
 
-test("with an empty transcript nothing is removed", () => {
-  const code = '\n> 🧭 **You asked:** “never said this”\n';
-  assert.deepEqual(stripUnbackedAskedLines(code, []).removed, []);
+test("a cell with no quote line is returned untouched", () => {
+  const code = 'mo.vstack([mo.md(r"""### Detour\n\nThe idea."""), netviz(e)])';
+  assert.deepEqual(stripModelQuoteLines(code), { code, removed: [] });
+});
+
+test("the model's own wording of the quote line is caught too", () => {
+  // From a live m01 run: `You asked: *"…"*` — no 🧭, emphasis instead of bold.
+  const code = 'mo.md(r"""### Detour\n\nYou asked: *"so three visits total?"*\n\nHere is why.""")';
+  const r = stripModelQuoteLines(code);
+  assert.deepEqual(r.removed, ["so three visits total?"]);
+  assert.ok(r.code.includes("Here is why."));
 });
 
 // ---------------------------------------------------------------------------
@@ -920,24 +933,18 @@ test("with no address of our own, nothing is rewritten", () => {
   assert.deepEqual(rewriteRivalServer(t, ""), { text: t, hits: [] });
 });
 
-test("the model's own wording of the quote line is caught too", () => {
-  // From a live run: the tutor wrote its souvenir quote as `You asked: *"…"*`
-  // — no 🧭, emphasis instead of bold. A pattern anchored on the toolkit's own
-  // marker walks straight past it, and that is the door the Blocker uses.
-  const code = 'mo.md(r"""### Detour\n\nYou asked: *"so three visits total?"*\n\nHere is why.""")';
-  const r = stripUnbackedAskedLines(code, ["need all to have even degree"]);
-  assert.deepEqual(r.removed, ["so three visits total?"]);
-  assert.ok(!r.code.includes("so three visits total"));
-  assert.ok(r.code.includes("Here is why."));
-});
-
-test("the same line, when they really said it, is left alone", () => {
-  // The exact souvenir a live run produced. Widening the pattern must not
-  // start deleting honest quotes.
-  const said = ["whats the difference between a trail and a circuit? i keep mixing them up"];
+test("even a word-perfect quote is the extension's to write, not the model's", () => {
+  // The m01 souvenir, where the model's line WAS verbatim. It still goes: the
+  // extension puts the same words back through prependQuestionToCell, and a
+  // rule of "remove only the wrong ones" is what let the m02 truncation
+  // through. One rule, no judgement about which copy is better.
   const code =
     'mo.md(r"""### Detour: trail vs circuit\n\nYou asked: *"whats the difference between a trail and a circuit? i keep mixing them up"*\n\n- A **trail** is a walk…""")';
-  assert.deepEqual(stripUnbackedAskedLines(code, said), { code, removed: [] });
+  const r = stripModelQuoteLines(code);
+  assert.deepEqual(r.removed, [
+    "whats the difference between a trail and a circuit? i keep mixing them up",
+  ]);
+  assert.ok(r.code.includes("A **trail** is a walk"));
 });
 
 // ---------------------------------------------------------------------------

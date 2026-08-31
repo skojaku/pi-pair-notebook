@@ -546,38 +546,50 @@ const ASKED_SEGMENT =
   />?[ \t]*(?:🧭[ \t]*)?(?:\*\*|__)?You asked:?(?:\*\*|__)?[ \t]*[*_]*[“"]([^”"]*)[”"][*_]*[ \t]*/gi;
 
 /**
- * Take a **You asked** line the MODEL wrote out of a cell body before that
- * cell exists.
+ * Take the MODEL's **You asked** line out of a cell body before that cell
+ * exists. Every one of them, backed or not.
  *
- * The other door into the same Blocker. log_detour's own bounce text used to
- * hand the model the literal template —
- *   mo.vstack([mo.md(r\"\"\"> 🧭 **You asked:** “…”  …
- * — and a cell built from it satisfies the "is the question quoted?" check
- * with the model's own wording, so the extension's quoting path never runs and
- * the fabricated sentence ships. That template is gone from the bounces now;
- * this is the mechanism behind it, and it works on any cell body the model
- * hands to nb_add_cell or nb_edit_cell.
+ * "The quote line is the extension's job, not the model's" is the rule this
+ * file already states at log_detour's gap check, and it is stated because the
+ * model cannot be trusted with it. Two live faults, one each way:
  *
- * WHOLE LINES ONLY, and never a line carrying a Python string delimiter. The
- * quote sits inside a triple-quoted markdown literal, so dropping a complete
- * interior line cannot unbalance the source — but a line that holds `\"\"\"`
- * can, and this file already records what string surgery on cell source cost
- * once ("produced unparseable source for a multi-line netviz(...) call"). A
- * line it cannot remove safely is left exactly where it is.
+ *   UNBACKED. log_detour's bounce text used to hand over the literal template,
+ *   and a cell built from it satisfied the "is the question quoted?" test with
+ *   the MODEL's wording — so the extension's quoting path never ran and a
+ *   sentence the student never typed shipped in their keepsake. That is the
+ *   Blocker in pi-pair-notebook#5.
+ *
+ *   BACKED BUT SHORT. An m02 run wrote
+ *       You asked: *"whats the difference between an average and a median hop count?"*
+ *   for a student who typed that PLUS "i keep mixing them up". Containment says
+ *   backed, so an unbacked-only rule leaves it — and then the extension's own
+ *   check finds no match for the full message, prepends the correct quote, and
+ *   the souvenir carries the question twice: once whole, once with half the
+ *   student's sentence missing.
+ *
+ * So the rule is not "remove the false ones", it is "the model does not write
+ * this line". The extension adds the right one straight after — through
+ * withQuotedQuestion on the markdown path, prependQuestionToCell on the cell
+ * path, and quoteCellBeside when that will not go in.
+ *
+ * WHOLE SEGMENTS, never a line holding a string delimiter. The quote sits
+ * inside a triple-quoted markdown literal, and the shape the model actually
+ * writes puts the marker and the closing `"""` on the same line — so a
+ * LINE-based strip has to refuse exactly the case it exists for. Matching the
+ * marker plus its quoted span removes only text that provably contains no
+ * delimiter, wherever on the line it sits.
  */
-export function stripUnbackedAskedLines(
+export function stripModelQuoteLines(
   code: string,
-  pool: string[],
 ): { code: string; removed: string[] } {
   const removed: string[] = [];
   const out = code.replace(ASKED_SEGMENT, (whole, quoted: string) => {
     // Belt and braces. The capture group cannot contain a `"` at all, so this
-    // can only fire on a pathological `'''`; keeping the segment is always the
+    // can only fire on a pathological `\'\'\'`; keeping the segment is always the
     // safe answer, because unparseable Python in a student's notebook is worse
-    // than a quote that has to be reported instead of removed.
-    if (/"""|'''/.test(whole)) return whole;
-    if (!quoted.trim()) return whole; // nothing attributed, nothing to disprove
-    if (quoteIsBacked(quoted, pool)) return whole;
+    // than a quote line that has to be reported instead of removed.
+    if (/"""|\'\'\'/.test(whole)) return whole;
+    if (!quoted.trim()) return whole;
     removed.push(quoted.trim());
     return "";
   });
