@@ -38,18 +38,21 @@ import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // type-stripping and pi's jiti loader accept, so one source file serves both
 // with no build step.
 import {
-  bigramDice,
+  answerCountForGate,
   baseCheckpointId,
   capturePick,
   chooseQuotedWithFallback,
   driftIsReportable,
-  editDistanceAtMost,
   fillSlots,
   isFigure,
-  isFillerMessage,
   matchDetourQuestion,
   normMsg,
+  notebookBanner,
+  NOTEBOOK_BANNER_PREFIX,
+  type PickRecord,
+  quoteIsBacked,
   repairQuotes,
+  rewriteRivalServer,
   slotDrift,
   slotMarkers,
   SLOT_GLUE,
@@ -57,11 +60,21 @@ import {
   snapToTranscript,
   scriptedQuestionCount,
   snapCheckpointId as snapIdAgainst,
+  souvenirVerdict,
+  stripUnbackedAskedLines,
   verbatimFill,
   truncatedQuote,
   withQuotedQuestion,
 } from "./lib/verbatim.ts";
-import { py, pyList, pyMd, sanitize, stripRedundantImports } from "./lib/pysrc.ts";
+import {
+  kernelRefusal,
+  py,
+  pyList,
+  pyMd,
+  sanitize,
+  scanKernelCode,
+  stripRedundantImports,
+} from "./lib/pysrc.ts";
 
 /** This file's directory. */
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -382,6 +395,44 @@ function startMarimo(): Promise<{ url?: string; error?: string }> {
   });
 }
 
+/**
+ * Say where the notebook is, to the STUDENT, in this toolkit's own words.
+ *
+ * The address used to be spoken only from openInBrowser's failure branch, and
+ * on macOS `open <url>` exits 0 the moment it has handed the URL to a browser
+ * — so a page that opened behind the terminal, on another Space, or in a
+ * browser nobody was watching was a SUCCESS, and the URL was never said. All
+ * three submitted m01 sessions began with a student who could not find their
+ * notebook; two of them lost 21 minutes and 22 hours of a graded session to
+ * it. The tutor cannot say an address nobody has told it, and what it does
+ * with the gap is invent one (see nb_notebook_url).
+ *
+ * Printed, not asked for. A note to the tutor would only move the improvising
+ * one step earlier. This is the one other message in the toolkit written for
+ * the student to act on rather than read, and it renders like the other one.
+ *
+ * Never a guessed address: marimoBase() falls back to 127.0.0.1:2718, and
+ * startMarimo's own comment records that the port often is not that — a
+ * printed guess is worse than silence.
+ */
+let announcedNotebook = false;
+function announceNotebook(url: string, opened: boolean): void {
+  const body = notebookBanner(`${url.replace(/\/+$/, "")}/?view-as=present`, opened);
+  if (!body) return;
+  if (opened && announcedNotebook) return;
+  announcedNotebook = true;
+  try {
+    piRef?.sendMessage(
+      { customType: "notebook-url", content: body, display: true },
+      // NOT "nextTurn": that parks the message until some later turn runs, and
+      // the whole point is that the student sees it before they need it.
+      { triggerTurn: false },
+    );
+  } catch {
+    /* best effort — nb_notebook_url is still there */
+  }
+}
+
 /** Start the server once, remember the result, open the student's page. */
 function marimoUrl(): Promise<{ url?: string; error?: string }> {
   if (externalMarimo()) return Promise.resolve({ url: marimoBase() });
@@ -392,16 +443,19 @@ function marimoUrl(): Promise<{ url?: string; error?: string }> {
       // student's own code might make.
       process.env.MARIMO_URL = r.url;
       openInBrowser(`${r.url}/?view-as=present`, () => {
-        // No browser opener on this machine — the tutor has to say it out loud,
+        // No browser opener on this machine at all — say it again, harder,
         // because a notebook nobody has open is a kernel that never wakes.
+        announcedNotebook = false;
+        announceNotebook(r.url!, false);
         try {
           piRef?.sendMessage(
             {
-              customType: "notebook-url",
+              customType: "notebook-note",
               content:
-                `NOTE (invisible to the student): their notebook page did not open by itself. ` +
-                `Tell them in ONE sentence to open ${r.url}/?view-as=present in their browser, ` +
-                `then carry on.`,
+                `NOTE (invisible to the student): their notebook page did not open by itself, ` +
+                `and they have been shown its address. If they say they cannot see it, call ` +
+                `nb_notebook_url and read them what it returns — never ask them to start the ` +
+                `notebook themselves.`,
               display: false,
             },
             { deliverAs: "nextTurn" },
@@ -507,6 +561,28 @@ function marimoHeaders(extra?: Record<string, string>): Record<string, string> {
   return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra };
 }
 
+/**
+ * The shell the toolkit thought it had taken away. The scan itself is in
+ * lib/pysrc.ts, where `npm test` runs it; this is the door.
+ *
+ * NOT strike-capped, and that is a deliberate departure from every other
+ * refusal in this file. The capped ones — slot drift, the cell review, the
+ * build order, the late close — stand between the student and their RECORD,
+ * so a guard that will not let go can strand them at a checkpoint they have
+ * already finished. This one stands between the model and a CAPABILITY, and
+ * nothing on the graded path goes through a refused name: the toolkit writes
+ * the log, the notes, the summary and the photo saves itself. Three strikes
+ * and then the port scan runs is not a backstop, it is a delay.
+ *
+ * The way out is an environment variable an instructor can set and the model
+ * cannot reach.
+ */
+function kernelGuard(code: string): string | null {
+  if (process.env.PAIR_NOTEBOOK_KERNEL_UNSAFE === "1") return null;
+  const scan = scanKernelCode(code);
+  return scan.ok ? null : kernelRefusal(scan.hits);
+}
+
 /** What the tutor is told when the notebook cannot be reached at all. */
 const NO_NOTEBOOK =
   "The notebook is not reachable, so nothing can be built or read there right now. " +
@@ -559,12 +635,20 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
     ids = Object.keys(sessions ?? {});
     if (ids.length > 0) break;
     if (Date.now() >= deadline || signal.aborted) {
+      // WITH the address. "Ask the student to open the notebook tab" was an
+      // instruction the tutor could not carry out: it had never been told
+      // where the tab is, and what it did with that gap was tell a student to
+      // start a second server.
       return {
         reason: "no-page",
         error:
           "The notebook page is not open, so its kernel is asleep and nothing can be built " +
-          "there. Ask the student to open the notebook tab (it may have been closed) — and " +
-          "keep teaching in the terminal meanwhile.",
+          "there. Ask the student to open " +
+          (/^https?:\/\/\S+$/.test(process.env.MARIMO_URL ?? "")
+            ? `${marimoBase()}/?view-as=present — that exact address, in one sentence`
+            : "the notebook tab (it may have been closed)") +
+          " — and keep teaching in the terminal meanwhile. Never ask them to start the " +
+          "notebook themselves.",
       };
     }
     if (!nudged && Date.now() >= nudgeAt) {
@@ -1925,8 +2009,23 @@ let closedAtEntryId: string | null = null;
 // Every pi.sendMessage injection lands in the transcript with role "user".
 // Anything added here MUST start with one of these prefixes, or it is filed
 // as the student's own words and quoted back at them in the graded record.
-const INJECTED_PREFIX =
-  /^(CHAPTER SCRIPT|RESUME CONTEXT|=== TUTORING HANDOFF|The student clicked|Please start the tutoring session|── Chapter |NOTE \(invisible to the student\)|REFEREE VERDICT)/;
+/**
+ * The messages this toolkit prints for the STUDENT rather than for the tutor.
+ * There are two, and both are things to act on: where the notebook is, and
+ * "your tutor cannot reach the course server". Everything else the extension
+ * injects is a brief the tutor reads and the student never sees.
+ */
+const STUDENT_FACING_MESSAGES = new Set(["setup-help", "notebook-url"]);
+
+// Built rather than written out, so the banner's own opener cannot drift from
+// the test that filters it. A message this toolkit printed must never be filed
+// as something the student typed: a graded row in this repo already carries 44
+// words of chapter prose as a student's first verbatim utterance.
+const INJECTED_PREFIX = new RegExp(
+  `^(CHAPTER SCRIPT|RESUME CONTEXT|=== TUTORING HANDOFF|The student clicked|` +
+    `Please start the tutoring session|── Chapter |NOTE \\(invisible to the student\\)|` +
+    `REFEREE VERDICT|⚠ {2}Your tutor cannot reach|${NOTEBOOK_BANNER_PREFIX})`,
+);
 
 /**
  * Curriculum prose that must never be filed as something the student said.
@@ -2092,7 +2191,7 @@ function tutorAwaitingAnswer(ctx: any): string {
  * in the artifact they submit. These are captured straight off the
  * ask_user_question tool result instead.
  */
-const pickedAnswers: string[] = [];
+const pickedAnswers: PickRecord[] = [];
 let pickedMark = 0;
 /**
  * Set while the resume brief is in flight. The continue-or-fresh dialog is
@@ -2107,16 +2206,30 @@ function recordPickedAnswer(event: any): void {
     // Only the two mutable globals stay here.
     const r = capturePick(event, awaitingResumeChoice);
     if (r.resumeAnswered) awaitingResumeChoice = false;
-    if (r.picked) pickedAnswers.push(r.picked);
+    for (const p of r.picks) pickedAnswers.push(p);
   } catch {
     // capture is best-effort; never break a turn
   }
 }
 
-function pickedSince(commit = true): string[] {
+function pickedSince(commit = true): PickRecord[] {
   const fresh = pickedAnswers.slice(pickedMark);
   if (commit) pickedMark = pickedAnswers.length;
   return fresh;
+}
+
+/**
+ * Every pick as plain text, machinery included.
+ *
+ * Whatever the split does to the ROW, both halves stay in every pool that
+ * checks the student's words against what they said. Leaving picks out of that
+ * pool refused cp1's honest record twice — "about 20", a figure that appears
+ * in neither the typed follow-up nor the question — and then stamped a false
+ * quoting warning on the notebook they submitted. Splitting them into two
+ * fields is a second way to leave them out, and it must not become one.
+ */
+function pickedTexts(fresh: PickRecord[] = pickedAnswers.slice(pickedMark)): string[] {
+  return fresh.map((p) => p.answer).filter(Boolean);
 }
 
 function studentSaidSince(ctx: any, commit = true): string[] {
@@ -2365,6 +2478,14 @@ function tutorSpokeSinceStudent(ctx: any): boolean {
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
       if (e?.type === "custom_message") {
+        // Two of these are not briefs to the tutor at all — they are lines
+        // this toolkit prints for the STUDENT to act on (where the notebook
+        // is; the model is unreachable). Speech owed after a fresh brief is
+        // speech owed now, but nothing is owed because the extension put a
+        // sentence on the screen: counting them stamped a false
+        // `closed_without_speaking` on the graded row of any checkpoint the
+        // notebook happened to finish booting inside.
+        if (STUDENT_FACING_MESSAGES.has(String(e.customType ?? ""))) continue;
         if (partsText(e.content)) return false;
         continue;
       }
@@ -2465,8 +2586,11 @@ const CHAPTER_BOUNDARY_TYPES = new Set(["chapter-script", "chapter-divider"]);
  * on the FIRST spoken turn cannot land after any of a checkpoint's own
  * questions. It errs early by construction — a bridge sentence, a tool
  * preamble, a late reveal all anchor before the real question — and the extra
- * turns that lets through are exactly the residue ACK_WORDS + isFillerMessage
- * were built for. The two defences split the work; neither gives ground.
+ * turns that lets through are exactly the residue lib/verbatim.ts's ACK_WORDS
+ * and isFillerMessage were built for (this file no longer imports either: the
+ * narrowing runs inside chooseQuoted, and an import with no call site is what
+ * test/imports.test.ts now refuses). The two defences split the work; neither
+ * gives ground.
  */
 function preQuestionCount(ctx: any): number {
   try {
@@ -2597,6 +2721,9 @@ async function prependQuestionToCell(
       `    _last = _tree.body[-1]\n` +
       `    _head = "\\n".join(_lines[: _last.lineno - 1])\n` +
       `    _tail = "\\n".join(_lines[_last.lineno - 1 : _last.end_lineno])\n` +
+      // Everything AFTER the last top-level expression — a trailing comment,
+      // a blank line. It was dropped on every successful prepend, silently.
+      `    _foot = "\\n".join(_lines[_last.end_lineno :])\n` +
       `    _v = _last.value\n` +
       `    _is_vstack = (\n` +
       `        isinstance(_v, ast.Call)\n` +
@@ -2612,11 +2739,65 @@ async function prependQuestionToCell(
       `        _indented = "\\n".join("    " + _l for _l in _tail.split("\\n"))\n` +
       `        _body = "mo.vstack([\\n    " + _quote + ",\\n" + _indented + ",\\n])"\n` +
       `    _new = (_head + "\\n" + _body) if _head else _body\n` +
+      `    if _foot.strip():\n` +
+      `        _new = _new + "\\n" + _foot\n` +
       `    ast.parse(_new)\n` +
       `    async with cm.get_context() as ctx:\n` +
       `        ctx.edit_cell(${py(name)}, _new)\n` +
       `        ctx.run_cell(${py(name)})\n` +
       `    print("QUOTED")\n`,
+    signal,
+  );
+  return !r.failed && r.out.includes("QUOTED");
+}
+
+/**
+ * Put the student's question in a cell of its OWN, directly above the
+ * souvenir.
+ *
+ * The second route to the same one line, for when the first will not go. The
+ * quote is the extension's job — "The quote line is the extension's job, not
+ * the model's" is written at log_detour's own gap check — and until now a
+ * `false` from prependQuestionToCell simply lost it, silently, with the
+ * prose-only warning printing over the top. Two of one student's three
+ * souvenirs shipped with the tutor's paraphrase of their question instead of
+ * their words, and the row said nothing.
+ *
+ * ADDITIVE, and that is the point: it opens no cell it has to reparse, so the
+ * shape that defeated the prepend cannot defeat it as well. String surgery on
+ * a live souvenir is what the ast rewrite above exists to avoid, and this
+ * writes nothing into the tutor's cell at all.
+ */
+async function quoteCellBeside(
+  souvenir: string,
+  question: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!question.trim()) return false;
+  const name = `${sanitize(souvenir)}_asked`;
+  const body = `mo.md(${pyMd(`> 🧭 **You asked:** “${question}”`)})`;
+  const r = await runKernel(
+    `import marimo._code_mode as cm\n` +
+      `async with cm.get_context() as ctx:\n` +
+      `    _names = [c.name for c in ctx.cells]\n` +
+      `    if ${py(name)} in _names:\n` +
+      `        print("QUOTED")\n` +
+      `    else:\n` +
+      `        _t = [c for c in ctx.cells if c.name == ${py(souvenir)}]\n` +
+      `        _qid = None\n` +
+      // `before=` is the tidy way and may not exist on every marimo we run
+      // against; the fallback needs only create_cell and move_cell, both of
+      // which this file already depends on elsewhere.
+      `        try:\n` +
+      `            _qid = ctx.create_cell(${py(body)}, name=${py(name)}, hide_code=True, before=_t[0].id) if _t else None\n` +
+      `        except TypeError:\n` +
+      `            _qid = None\n` +
+      `        if _qid is None:\n` +
+      `            _qid = ctx.create_cell(${py(body)}, name=${py(name)}, hide_code=True)\n` +
+      `            if _t:\n` +
+      `                ctx.move_cell(_t[0].id, after=_qid)\n` +
+      `        ctx.run_cell(_qid)\n` +
+      `        print("QUOTED")\n`,
     signal,
   );
   return !r.failed && r.out.includes("QUOTED");
@@ -2787,6 +2968,21 @@ function buildSessionRecord(entries: any[]): string {
     if (pickedRaw.length) {
       lines.push(`*You chose:* ${pickedRaw.map((s) => `"${s}"`).join(" · ")}`, "");
     }
+    // The housekeeping dialogs, on their own line and named as such. They used
+    // to ride into *You chose:* — a submitted notebook has "Found it — I can
+    // see the city now", the answer to an improvised "did the page open?",
+    // printed as part of a graded prediction about the seven bridges.
+    //
+    // Shown rather than hidden, deliberately. The split is decided by a word
+    // list over the TUTOR's question, and a word list can be wrong; if it ever
+    // files a real answer here, the student can still see what they said. A
+    // misroute must cost a label, never a line of the record.
+    const mechRaw: string[] = Array.isArray(e.student_picked_mechanics)
+      ? e.student_picked_mechanics.map((s: unknown) => String(s ?? "").trim()).filter(Boolean)
+      : [];
+    if (mechRaw.length) {
+      lines.push(`*Getting set up:* ${mechRaw.map((s) => `"${s}"`).join(" · ")}`, "");
+    }
     if (saidRaw.length) {
       lines.push(
         `*You typed:* ${saidRaw.map((s) => `"${s.replace(/\n+/g, " ")}"`).join(" · ")}`,
@@ -2840,9 +3036,22 @@ function buildSessionRecord(entries: any[]): string {
       lines.push(`*The module stops here — still to come: ${notReached.join(", ")}.*`, "");
     }
   }
-  if (detours.length) {
-    lines.push(`### 🧭 Your own questions (${detours.length})`, "");
-    for (const d of detours) lines.push(`- *${String(d.question ?? "").trim()}*`);
+  // "Your own questions" has to be their own. A detour whose question the
+  // transcript could not back is one the tutor composed — log_detour keeps the
+  // wording on the row and refuses to quote it in the souvenir, and the
+  // closing record is the same keepsake by another route, so it is held to the
+  // same rule. Printed either way: an aside the tutor took is worth having in
+  // the record, just not under a heading that puts words in their mouth.
+  const asked = detours.filter((d) => !d?.question_unsupported);
+  const aside = detours.filter((d) => d?.question_unsupported);
+  if (asked.length) {
+    lines.push(`### 🧭 Your own questions (${asked.length})`, "");
+    for (const d of asked) lines.push(`- *${String(d.question ?? "").trim()}*`);
+    lines.push("");
+  }
+  if (aside.length) {
+    lines.push(`### 🧭 Side trips we took (${aside.length})`, "");
+    for (const d of aside) lines.push(`- *${String(d.question ?? "").trim()}*`);
     lines.push("");
   }
   return lines.join("\n");
@@ -2876,7 +3085,19 @@ function buildSessionSummary(entries: any[], allCheckpoints: string[]): string {
     ...(modId ? [`Module: ${modId}${modVer ? ` v${modVer}` : ""}`] : []),
     `Checkpoints completed: ${allCheckpoints.filter((id) => done.has(id)).length} of ${allCheckpoints.length}`,
     ...(extras ? [`Extra practice rounds asked for: ${extras}`] : []),
-    `Detours (student's own questions): ${entries.filter((e) => e?.type === "detour").length}`,
+    // Their own, and the tutor's own asides counted separately — the label
+    // says "student's own questions", so a question the transcript cannot back
+    // must not be counted under it.
+    `Detours (student's own questions): ${
+      entries.filter((e) => e?.type === "detour" && !e?.question_unsupported).length
+    }`,
+    ...(entries.some((e) => e?.type === "detour" && e?.question_unsupported)
+      ? [
+          `Side trips the tutor took: ${
+            entries.filter((e) => e?.type === "detour" && e?.question_unsupported).length
+          }`,
+        ]
+      : []),
     "",
   ];
   for (const e of cps) {
@@ -3059,6 +3280,10 @@ export default function (pi: ExtensionAPI) {
   // a retry that reworded the question was a fresh key: four bounces, four
   // rewordings, and the detour never reached the record at all.
   const detourTextOnlyWarned = new Map<string, number>();
+  // Souvenirs whose question went into a cell of its OWN because the prepend
+  // would not go in. Remembered, or the next call re-reads the souvenir, still
+  // finds no quote in it, and puts a second copy in.
+  const souvenirQuotedBeside = new Set<string>();
   // Improvised-cell review refusals, per cell name — capped like the rest.
   const cellReviewWarned = new Map<string, number>();
   // chapter_done's "was this chapter actually taught?" refusals, per chapter.
@@ -3176,18 +3401,87 @@ export default function (pi: ExtensionAPI) {
     stopMarimo();
   });
 
-  // Rendered plainly, in the warning colour, because it is the one message in
-  // this whole toolkit written for the student to act on rather than read.
-  pi.registerMessageRenderer("setup-help", (message: any, _opts: any, theme: any) => {
-    const body = String(message.content ?? "")
-      .split("\n")
-      .map((l: string) => theme.fg("warning", l))
-      .join("\n");
-    return new Text(body, 0, 0);
-  });
+  // Rendered plainly, in the warning colour, because these are the two
+  // messages in this whole toolkit written for the student to act on rather
+  // than read: a tutor that cannot reach its model, and a notebook page they
+  // have not found.
+  for (const kind of STUDENT_FACING_MESSAGES) {
+    pi.registerMessageRenderer(kind, (message: any, _opts: any, theme: any) => {
+      const body = String(message.content ?? "")
+        .split("\n")
+        .map((l: string) => theme.fg("warning", l))
+        .join("\n");
+      return new Text(body, 0, 0);
+    });
+  }
+
+  // ── Take a second marimo server out of the tutor's mouth ──────────────────
+  // Asked where the notebook was, a live tutor told the student to run
+  // `marimo edit notebook.py` in a new terminal — which starts a rival server
+  // on another port, so the page they then watch is not the one being built
+  // in. The rewrite happens at RENDER time, which is the whole difference
+  // between this and NARRATES_A_BUILD (deleted in f8fe8f2): that one fired an
+  // invisible note after the sentence was already on screen and "could not
+  // unsay" it. This one unsays it. See rewriteRivalServer for why a command
+  // and a port number are a fair thing to match when a mood is not.
+  //
+  // Belt and braces, and the braces are the belt: even if this transformer is
+  // missing from an older pi, the address is printed at session start and
+  // nb_notebook_url answers the question directly.
+  let rivalNotes = 0;
+  try {
+    pi.registerMarkdownTransformer?.((markdown: string, mctx: any) => {
+      if (mctx?.messageType !== "assistant") return markdown;
+      const env = process.env.MARIMO_URL ?? "";
+      if (!/^https?:\/\/\S+$/.test(env)) return markdown;
+      const r = rewriteRivalServer(markdown, `${marimoBase()}/?view-as=present`);
+      if (!r.hits.length) return markdown;
+      // Once the message has stopped moving, and twice per session at most.
+      if (!mctx?.isStreaming && rivalNotes < 2) {
+        rivalNotes += 1;
+        try {
+          pi.sendMessage(
+            {
+              customType: "rival-server",
+              content:
+                `NOTE (invisible to the student): you just pointed them at ${r.hits[0]}. ` +
+                `The notebook server is already running and this toolkit owns it — a second ` +
+                `one is a second kernel on the same file, and the page they would be watching ` +
+                `is not the one you build in. What they read was corrected on screen. Use ` +
+                `nb_notebook_url for the address, and never ask them to start the notebook.`,
+              display: false,
+            },
+            { deliverAs: "nextTurn" },
+          );
+        } catch {
+          /* the rewrite already did the work */
+        }
+      }
+      return r.text;
+    });
+  } catch {
+    /* an older pi without markdown transformers: the banner still prints */
+  }
 
   pi.on("session_start", async (_event, _ctx) => {
     lastCtx = _ctx ?? lastCtx;
+    // ── Where the notebook is ────────────────────────────────────────────
+    // HERE, and not inside marimoUrl's own then-block, on purpose: an
+    // externally supplied server (the review harness pins one, and an
+    // instructor may run marimo by hand) returns from marimoUrl before that
+    // block is ever reached. Announcing there would have left the Part D gate
+    // unable to see this at all — which is how a fault of exactly this shape
+    // survives a green gate.
+    //
+    // Reset first: the flag is module-level and the process outlives a
+    // session, so `/new` and a resume in the same pi would otherwise skip the
+    // banner for every session after the first.
+    announcedNotebook = false;
+    void marimoUrl()
+      .then((r) => {
+        if (r.url) announceNotebook(r.url, true);
+      })
+      .catch(() => {});
     // The tutor talks; it does not run commands. Every notebook and log
     // operation goes through the quiet nb_* tools, so a raw shell would only
     // ever scroll past the student mid-lesson.
@@ -4097,7 +4391,15 @@ export default function (pi: ExtensionAPI) {
       // Peek, don't consume: a refusal below must leave the transcript mark
       // where it was, or the retry would log an empty student_said_verbatim.
       const said = studentSaidSince(ctx, false);
-      const picked = pickedSince(false);
+      const pickRecords = pickedSince(false);
+      // Both halves, everywhere a check compares the record against what the
+      // student actually said. The split below decides which FIELD a pick is
+      // written to; it must never decide whether a pick counts as their words.
+      const picked = pickedTexts(pickRecords);
+      const pickedLesson = pickRecords.filter((p) => !p.mechanics).map((p) => p.answer);
+      const pickedMechanics = pickRecords
+        .filter((p) => p.mechanics)
+        .map((p) => (p.question ? `${p.question} → ${p.answer}` : p.answer));
       // Note «slots» the instructor marked «… verbatim» are held to the
       // student's own words. «their pick» (a picker choice, which never
       // reaches the transcript) and free commentary slots are the tutor's to
@@ -4550,7 +4852,20 @@ export default function (pi: ExtensionAPI) {
       // two messages costs one extra tool call and nothing else, and the
       // nudge says so.
       const qCount = scriptedQuestionCountFor(baseCheckpointId(id));
-      const moreAnswersThanQuestions = qCount > 0 && said.length > qCount;
+      // Not said.length. The raw window holds a detour's turns too, and a
+      // student who asked ONE question mid-checkpoint tripped this refusal —
+      // measured in a live run on a checkpoint they answered correctly first
+      // try, on turns 1 and 3, with a logged detour in between. The refusal's
+      // prescribed remedy is to raise hints_used, so the fix it argues for is
+      // a lie in the graded record; and it fires more often the more a student
+      // asks, which degrades the record of exactly the curious student this
+      // module wants.
+      //
+      // The count comes from the SAME narrowing the note cell uses, so the two
+      // can never disagree again about what an answer is here. Subtracting can
+      // only turn the gate off, never on.
+      const answerCount = answerCountForGate({ said, response, detourSpans, detourAsked });
+      const moreAnswersThanQuestions = qCount > 0 && answerCount > qCount;
       const lateStrikes = lateCloseWarned.get(id) ?? 0;
       if (
         (turnsInCheckpoint >= STUCK_TURNS || moreAnswersThanQuestions) &&
@@ -4565,7 +4880,7 @@ export default function (pi: ExtensionAPI) {
             `NOT LOGGED — ` +
             (moreAnswersThanQuestions
               ? `this checkpoint's script asks ${qCount} question${qCount === 1 ? "" : "s"} ` +
-                `and the student sent ${said.length} answers, `
+                `and the student sent ${answerCount} answers, `
               : `this checkpoint has been open for ${turnsInCheckpoint} turns `) +
             `and you are logging it with no hints. Two things to fix, in this order.\n` +
             `1. hints_used: count the smaller questions you asked to get them there. ` +
@@ -4614,6 +4929,11 @@ export default function (pi: ExtensionAPI) {
       // The spans are indices into the window that just closed. Left behind,
       // they would point at whatever the NEXT checkpoint's window puts in
       // those slots — the student's own answers.
+      //
+      // BELOW the late-close gate, and it has to stay below: the gate reads
+      // these two to work out how many of `said` were answers to THIS
+      // checkpoint rather than to an aside. Moving this block above it would
+      // revert that fix with no test failing except the ones written for it.
       detourSpans.length = 0;
 
       // A checkpoint that needed hints is `pass_with_hints`, whatever the
@@ -4675,9 +4995,24 @@ export default function (pi: ExtensionAPI) {
         // with. Hints are never held against the student; a record that
         // undercounts them is what damages this.
         turns_in_checkpoint: turnsTaken,
+        // How many of those messages the gate counted as answers to THIS
+        // checkpoint, when that is not all of them. Recorded rather than
+        // silent: without it a grader reading nine student turns beside a
+        // quiet gate cannot see that an aside is why.
+        ...(answerCount !== said.length ? { answers_counted: answerCount } : {}),
         notes: String(params.notes ?? ""),
         student_said_verbatim: said,
-        ...(picked.length > 0 ? { student_picked: picked } : {}),
+        // The lesson half. Every dialog answer used to land here, including
+        // the ones the tutor raised for its own housekeeping: a submitted log
+        // has "Found it — I can see the city now" — the answer to an
+        // improvised "did the page open?" — filed beside a student's real
+        // prediction about the seven bridges, and rendered into their notebook
+        // as part of it. The machinery half is KEPT, in its own field with the
+        // question attached: that answer is the best evidence in the whole
+        // submission that the page never opened by itself. It is just not an
+        // answer to the bridge puzzle.
+        ...(pickedLesson.length > 0 ? { student_picked: pickedLesson } : {}),
+        ...(pickedMechanics.length > 0 ? { student_picked_mechanics: pickedMechanics } : {}),
         ...(responseSnappedFrom ? { response_retyped_as: responseSnappedFrom } : {}),
         ...(photoMissing ? { photo_missing: true } : {}),
         // This is the whole of the reveal check now — there is no refusal
@@ -5203,73 +5538,17 @@ export default function (pi: ExtensionAPI) {
       // never when it obeyed — measured: verbatim and true paraphrase both
       // leaked, a tidied quote was the only shape that worked.
       {
-        const qNorm = normMsg(question);
-        // A message containing the question is a match; a message CONTAINED
-        // IN it is not — "triangles" sits inside "why do triangles matter?"
-        // and is a perfectly good answer.
-        let bestIdx = -1;
-        let bestScore = 0;
-        saidNow.forEach((m, i) => {
-          const n = normMsg(m);
-          const d = n === qNorm || (qNorm.length > 0 && n.includes(qNorm)) ? 1 : bigramDice(m, question);
-          if (d > bestScore) {
-            bestScore = d;
-            bestIdx = i;
-          }
-        });
-        // Below near-identity, the message also has to LOOK like a question
-        // — and question shape is decided at the START of the utterance, not
-        // by a wh-word anywhere in it. A wh-word ANYWHERE deleted a student's
-        // real answer from their own note: "clustering is how often my
-        // friends know each other" scores 0.78 against the question "how
-        // often do friends know each other", and contains "how". Dropping
-        // their work from the graded artifact is far worse than leaving a
-        // question in it, so this errs toward keeping.
-        // `which`, `whether` and `if` are deliberately NOT openers: they lead
-        // declaratives at least as often ("which means C stays the same").
+        // The matcher itself lives in lib/verbatim.ts, where `npm test` runs
+        // it. It was extracted there — with tests named after the live faults
+        // it encodes — and the call site was never swapped, so for four
+        // commits this file ran a hand-copied duplicate and those tests were
+        // green against code no session ever reached. test/imports.test.ts
+        // now fails on a name imported from lib/ that nothing calls, which is
+        // the check that would have caught it the day it shipped.
+        const m = matchDetourQuestion(question, saidNow);
+        const bestIdx = m.index;
         const asked = bestIdx >= 0 ? saidNow[bestIdx] : "";
-        const QUESTION_OPENER =
-          /^(?:(?:wait|hang on|hold on|sorry|ok|okay|hmm+|umm+|oh|but|and|also|quick|one more|side note|random|off topic)[ ]+)*(?:what|whats|why|how|hows|when|where|who|whos|is|are|isnt|arent|do|does|did|dont|doesnt|can|could|should|would|will)\b|^(?:i (?:dont|do not|didnt|cant) (?:get|understand|see|follow)|im (?:confused|lost)|i(?:m| am) not sure (?:what|why|how))\b/;
-        const looksAsked = /\?/.test(asked) || QUESTION_OPENER.test(normMsg(asked));
-        // A message that is their question AND something else keeps its
-        // something else. Dropping whole messages cost a student the "i
-        // count 2" out of "how many could there be? i count 2" — half an
-        // answer, gone from the note, on the checkpoint that was about
-        // counting. Any figure in the residue, or three content words of
-        // it, means this message is carrying more than the question.
-        const qNormFull = normMsg(question);
-        const aNorm = normMsg(asked);
-        // WHERE the leftovers sit decides what they are. A lead-in runs
-        // BEFORE the question ("wait, quick question before I do the average
-        // — does it matter which direction…"), and a live run lost that whole
-        // checkpoint's note to it: four content words in the run-up read as
-        // an answer. What comes AFTER is the half that is usually an answer.
-        // Either way a figure anywhere in the leftovers means graded content,
-        // and the message stays whole.
-        const at = qNormFull ? aNorm.indexOf(qNormFull) : -1;
-        const tokensOf = (t: string) => t.split(" ").filter(Boolean);
-        const before = at >= 0 ? tokensOf(aNorm.slice(0, at)) : [];
-        const after = at >= 0 ? tokensOf(aNorm.slice(at + qNormFull.length)) : [];
-        const qTok = new Set(tokensOf(qNormFull));
-        const residue =
-          at >= 0 ? [...before, ...after] : tokensOf(aNorm).filter((t) => !qTok.has(t));
-        // Only the trailing half is weighed by length; a lead-in is judged on
-        // figures alone.
-        const weighed = at >= 0 ? after : residue;
-        const HEDGE_WORDS = new Set([
-          "wait", "hang", "hold", "sorry", "ok", "okay", "hmm", "hmmm", "umm", "um",
-          "oh", "ohh", "quick", "random", "side", "topic", "off", "exactly", "just",
-          "really", "actually", "again", "please", "btw", "like", "though", "tho",
-          "whats", "hows", "whos", "one", "more", "note", "er",
-        ]);
-        const carriesMore =
-          residue.some((t) => /\d/.test(t)) ||
-          weighed.filter((t) => !HEDGE_WORDS.has(t) && !SLOT_GLUE.has(t)).length >= 3;
-        if (
-          bestIdx >= 0 &&
-          !carriesMore &&
-          (bestScore >= 0.9 || (bestScore >= 0.6 && looksAsked))
-        ) {
+        if (m.isDetour) {
           detourAsked.add(normMsg(asked));
           // The question is not the whole detour. Everything from it to here
           // is the aside — the tutor's answer, the offer of a souvenir, their
@@ -5293,7 +5572,30 @@ export default function (pi: ExtensionAPI) {
         }
         if (snapped) detourAsked.add(normMsg(snapped));
       }
-      let gap = "";
+      // ── Is this quote theirs at all? ──────────────────────────────────────
+      // snapToTranscript returns null both when the text is already verbatim
+      // in the transcript and when NOTHING in the transcript resembles it, and
+      // the second falls through to the model's own string — which is then
+      // written into the student's notebook under **You asked**. A submitted
+      // m01 notebook carries a whole sentence of reasoning that way, one its
+      // student never typed. Per REVIEWING.md that is a Blocker, and it is the
+      // one fault here no retry can undo: the keepsake is theirs to keep.
+      //
+      // Plain containment against everything they typed or picked. On every
+      // honest path it is a no-op, because every repair above ends in a REAL
+      // message (saidNow[m.index], or snapToTranscript's own return). It
+      // stands down when there is nothing to check against.
+      //
+      // The WHOLE session, not `saidNow`. The window opens where the last
+      // checkpoint closed, and AGENTS.md lets a detour be logged after that
+      // close — so a question asked before it is honest and simply not in the
+      // window. Judging against the window would refuse those, which is the
+      // shape of guard this file has had to withdraw four times. A union can
+      // only ever say "backed" more often.
+      const backingPool = [...allStudentMessages(ctx), ...saidNow, ...pickedTexts(pickedAnswers)];
+      const questionBacked = quoteIsBacked(snappedQ, backingPool);
+      let quoteRouted: "prepended" | "beside" | "" = "";
+      let verdict = souvenirVerdict({ missing: false, proseOnly: false, unquoted: false });
       if (cellName) {
         const src = await readCellSource(cellName, signal);
         // The quote line is the extension's job, not the model's. Left to the
@@ -5306,7 +5608,7 @@ export default function (pi: ExtensionAPI) {
           // No such cell. Saying "is prose only" about a cell that does not
           // exist sent the model editing thin air; the honest gap is the one
           // withQuotedQuestion's sibling check has always used.
-          gap = "does not exist in the notebook";
+          verdict = souvenirVerdict({ missing: true, proseOnly: false, unquoted: false });
         } else if (src !== null) {
           // Words, not bytes — the SAME normalisation withQuotedQuestion uses.
           // A byte-exact test called a cell unquoted because the quote had
@@ -5322,18 +5624,50 @@ export default function (pi: ExtensionAPI) {
           // `question`, and snappedQ may since have grown into the student's
           // full message.
           let quoted = flat(src).includes(flat(snappedQ)) || flat(src).includes(flat(question));
-          if (!quoted) quoted = await prependQuestionToCell(cellName, snappedQ, signal);
+          // An unbacked quote is not "already quoted", whoever wrote it — and
+          // it must not be written by us either. The souvenir keeps its prose
+          // and its picture; what it loses is the false attribution.
+          if (!questionBacked) quoted = true;
+          // Already put in beside this cell on an earlier call. Without this
+          // memo the retry after a prose-only bounce re-reads the SOUVENIR,
+          // still finds no quote there (it lives in the neighbouring cell),
+          // and prepends a second copy — the student's question, twice, in
+          // their keepsake. withQuotedQuestion's whole normalise-both-sides
+          // comparison exists because that happened once already.
+          else if (souvenirQuotedBeside.has(cellName)) quoted = true;
+          else if (!quoted) {
+            quoted = await prependQuestionToCell(cellName, snappedQ, signal);
+            if (quoted) quoteRouted = "prepended";
+            else {
+              // The prepend failed — a cell marimo will not rewrite, or an ast
+              // it will not reparse. The quote is ONE LINE and it is this
+              // extension's own job, so it must not depend on the model or on
+              // rewriting a cell that has already refused once: put it in a
+              // cell of its own, immediately above the souvenir. Two of three
+              // souvenirs in a submitted session shipped with no record of the
+              // question they answered, and a silent `false` here is why
+              // nobody noticed for three sessions.
+              quoted = await quoteCellBeside(cellName, snappedQ, signal);
+              if (quoted) {
+                quoteRouted = "beside";
+                souvenirQuotedBeside.add(cellName);
+              }
+            }
+          }
           const shows =
             /netviz\s*\(|mo\.ui\.|mo\.image\s*\(|alt\.Chart|sns\.\w+\s*\(|plt\.\w+\s*\(/.test(src);
-          gap = !shows
-            ? "is prose only — nothing to look at or play with"
-            : // The prepend failed (a cell marimo will not rewrite). Reporting
-              // success here shipped a souvenir with no question in it.
-              quoted
-              ? ""
-              : "never quotes the question it answers";
+          // BOTH faults, and the QUOTE first. `gap` carried one message and
+          // `!shows` won the ternary, so a markdown-table souvenir always
+          // reported "is prose only" and a missing quote was never mentioned —
+          // not in the bounce, not on the row. The prose-only warning then
+          // gives up after two tries by design, and took the quote with it.
+          // The student had asked for tables and no figures, which is a
+          // reasonable thing to want; it should not also cost them the record
+          // of their own question.
+          verdict = souvenirVerdict({ missing: false, proseOnly: !shows, unquoted: !quoted });
         }
       }
+      const gap = verdict.gap;
       const gapKey = cellName || question;
       if (gap && (detourTextOnlyWarned.get(gapKey) ?? 0) < 2) {
         detourTextOnlyWarned.set(gapKey, (detourTextOnlyWarned.get(gapKey) ?? 0) + 1);
@@ -5342,19 +5676,25 @@ export default function (pi: ExtensionAPI) {
         // advice: nb_edit_cell cannot create one, so it prints "no cell named
         // X", which renders as a ✓, and the model tries again against the
         // same nothing until the strikes run out.
-        const missing = gap === "does not exist in the notebook";
+        // These two templates used to show the **You asked:** line, and that
+        // was the leak: a model that copied the template wrote its OWN wording
+        // of the question into the cell, the "is it quoted?" test above then
+        // found it and stood down, and the fabricated quote shipped. The quote
+        // is not the model's line to write — the extension puts it in, in the
+        // student's bytes — so the template no longer contains it.
         return toResult({
-          out: missing
+          out: verdict.missing
             ? `NOT LOGGED YET — there is no cell named "${cellName}" in the notebook. ` +
               `nb_edit_cell cannot make one; build it first with nb_add_cell (name ` +
               `"${cellName}"), text and picture in ONE cell —\n` +
-              `  mo.vstack([mo.md(r"""> 🧭 **You asked:** “…”\n\n…"""), netviz(edges, highlight=[…])])\n` +
+              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), netviz(edges, highlight=[…])])\n` +
               `— or an nb_add_exercise box if the idea is playable. Then call log_detour ` +
-              `again with the same cell_name.`
+              `again with the same cell_name. Do NOT write a "You asked" line yourself: ` +
+              `the extension quotes their question for you, word for word.`
             : `NOT LOGGED YET — the souvenir cell "${cellName}" ${gap}. Fix it with ` +
               `nb_edit_cell so it holds something to see or try (their question is ` +
-              `quoted for you, you do not need to add it) —\n` +
-              `  mo.vstack([mo.md(r"""> 🧭 **You asked:** “…”\n\n…"""), netviz(edges, highlight=[…])])\n` +
+              `quoted for you — do not add it, and do not reword it) —\n` +
+              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), netviz(edges, highlight=[…])])\n` +
               `— or an nb_add_exercise box if the idea is playable. Then call log_detour ` +
               `again with the same cell_name.\n` +
               `If words genuinely are the whole answer here, call log_detour again as it ` +
@@ -5370,7 +5710,8 @@ export default function (pi: ExtensionAPI) {
             `the cell first with nb_add_cell (name "detour_<topic>"), text and picture in ` +
             `ONE cell: mo.vstack([mo.md(r"""…"""), netviz(edges, highlight=[…])]) — or an ` +
             `nb_add_exercise box if the idea is something they can try. Then call ` +
-            `log_detour again with cell_name.\n` +
+            `log_detour again with cell_name. Their question is quoted for you; do not ` +
+            `write a "You asked" line yourself.\n` +
             `If a picture genuinely adds nothing to this one, call log_detour again with ` +
             `the same souvenir_markdown and it will be accepted as it is.`,
           failed: false,
@@ -5382,7 +5723,16 @@ export default function (pi: ExtensionAPI) {
       let madeCell = "";
       let madeFailed = false;
       if (!cellName && md0) {
-        const md = withQuotedQuestion(md0, snappedQ, question);
+        // No quote line when the transcript cannot back one. A tutor-initiated
+        // aside is a fine thing to build — the ch5 stretch is exactly that —
+        // it just must not be labelled with words the student never said.
+        //
+        // The strip runs on this path too. withQuotedQuestion stands down when
+        // the markdown already "quotes the question", so a souvenir_markdown
+        // that arrives with the model's own **You asked** line in it would sail
+        // straight through the check above and into the notebook.
+        const clean = stripUnbackedAskedLines(md0, backingPool).code;
+        const md = questionBacked ? withQuotedQuestion(clean, snappedQ, question) : clean;
         const slug = sanitize(question.toLowerCase().split(/\s+/).slice(0, 4).join("_")).slice(
           0,
           40,
@@ -5405,6 +5755,17 @@ export default function (pi: ExtensionAPI) {
         // Accepted on the retry despite the gap — the grader sees what the
         // souvenir was missing rather than the tool pretending it was fine.
         ...(gap ? { souvenir_gap: gap } : {}),
+        // Named on its own, because it is the graded-record fault of the two
+        // and it spent three sessions hidden behind "is prose only".
+        ...(verdict.unquoted ? { souvenir_unquoted: true } : {}),
+        // The prepend failed and the quote went in beside the cell instead.
+        // Stamped so that a `false` from prependQuestionToCell is never silent
+        // again — that silence is why nobody looked for three sessions.
+        ...(quoteRouted === "beside" ? { souvenir_quote_cell: `${cellName}_asked` } : {}),
+        // Nothing they typed or picked contains this question, so no quote was
+        // written anywhere. The row keeps the model's wording in `question`,
+        // where it belongs; the student's notebook does not get it in theirs.
+        ...(questionBacked ? {} : { question_unsupported: true }),
       });
       if (!md0) {
         return toResult({
@@ -5412,7 +5773,7 @@ export default function (pi: ExtensionAPI) {
             ? // Do not call a cell that is not there "noted": the give-up path
               // reported success for a souvenir the student's notebook does
               // not contain, and the model moved on satisfied.
-              gap === "does not exist in the notebook"
+              verdict.missing
               ? `Logged — but there is still NO cell named "${cellName}" in the notebook, ` +
                 `so this detour has no souvenir. Build it with nb_add_cell (not ` +
                 `nb_edit_cell, which cannot create a cell) when you get a moment.`
@@ -5444,6 +5805,9 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use nb_add_cell / nb_edit_cell / nb_delete_cell / nb_read / nb_run for ALL notebook work — never bash, never raw marimo._code_mode boilerplate.",
       "Every nb_* status is shown to the student: short, warm, plain words only.",
+      // Written as a rule as well as enforced as a mechanism, because a rule
+      // the model can read is cheaper than a correction it has to be given.
+      "NEVER tell the student to start the notebook themselves — no `marimo edit`, no second terminal, no install. This toolkit runs the server; a second one is a second kernel on the same file and the page they would watch is not the one you build in. If they cannot find the notebook, call nb_notebook_url and read them the address.",
     ],
     parameters: Type.Object({
       status: STATUS_PARAM,
@@ -5458,6 +5822,10 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, signal) {
+      // A cell body runs in the same kernel nb_run does, and it is hidden from
+      // the student by default (hide_code), so it is not the safer door.
+      const refusedCode = kernelGuard(params.code);
+      if (refusedCode) return toResult({ out: refusedCode, failed: false });
       const warm = await ensureWarm(signal);
       if (warm) return toResult(warm);
       await flushParkedNotes(signal);
@@ -5481,6 +5849,21 @@ export default function (pi: ExtensionAPI) {
         `    _cid = ctx.create_cell(_code, name=${py(name)}, hide_code=${hide})\n` +
         `    ctx.run_cell(_cid)\n`;
       inner += focusCellCode("_cid", "    ");
+      // ── A quote the student never said, arriving by the other door ───────
+      // `> 🧭 **You asked:** “…”` is this toolkit's own marker: log_detour puts
+      // it in, with the student's bytes, and its bounce text no longer shows
+      // the model how. A cell that arrives carrying one anyway is the second
+      // route into the same Blocker — a fabricated sentence in the keepsake,
+      // attributed to the student — and it defeats log_detour's check, because
+      // a cell that already "quotes the question" is left alone.
+      //
+      // Whole lines only, never a line holding a string delimiter, and never
+      // when the transcript is empty. Recoverable if it ever gets this wrong:
+      // log_detour puts the BACKED quote back on the next call.
+      const cellQuotes = stripUnbackedAskedLines(params.code, [
+        ...allStudentMessages(lastCtx),
+        ...pickedTexts(pickedAnswers),
+      ]);
       // Improvised cells go through the review (nb_review.py) — it catches the
       // displays marimo would silently drop before the student sees a cell
       // with a missing figure.
@@ -5497,7 +5880,7 @@ export default function (pi: ExtensionAPI) {
       const code =
         `import marimo._code_mode as cm\n` +
         (review ? review + "\n" : "") +
-        `_code = ${py(stripRedundantImports(params.code))}\n` +
+        `_code = ${py(stripRedundantImports(cellQuotes.code))}\n` +
         (review
           ? `_code, _note, _fatal = _nb_review(_code)\n` +
             (enforce
@@ -5514,6 +5897,13 @@ export default function (pi: ExtensionAPI) {
           : inner);
       const addCellResult = await runKernel(code, signal);
       if (!addCellResult.failed) {
+        if (cellQuotes.removed.length) {
+          addCellResult.out +=
+            `\nNOTE — a "You asked" line was left out of this cell: nothing the student ` +
+            `typed or picked contains ${cellQuotes.removed.map((q) => `“${q}”`).join(", ")}. ` +
+            `That line is the extension's to write, from their own words, and log_detour ` +
+            `adds it. Build the aside itself; do not put words in their mouth.`;
+        }
         await pinAppealToBottom(signal);
         if (name !== wanted) {
           addCellResult.out +=
@@ -5571,6 +5961,9 @@ export default function (pi: ExtensionAPI) {
       if (!/^[A-Za-z_]\w*$/.test(name)) {
         return toResult({ out: `'${name}' is not a valid cell name.`, failed: true });
       }
+      // The scaffold is model-authored Python the student is invited to run.
+      const refusedScaffold = kernelGuard(String(params.scaffold ?? ""));
+      if (refusedScaffold) return toResult({ out: refusedScaffold, failed: false });
       const exCpId = String(params.checkpoint ?? "").trim();
       if (exCpId && paceUnasked.has(exCpId)) {
         paceUnasked.delete(exCpId);
@@ -6093,8 +6486,20 @@ export default function (pi: ExtensionAPI) {
       code: Type.String({ description: "The full replacement cell body (Python)." }),
     }),
     async execute(_id, params, signal) {
+      // A cell body runs in the same kernel nb_run does, and it is hidden from
+      // the student by default (hide_code), so it is not the safer door.
+      const refusedCode = kernelGuard(params.code);
+      if (refusedCode) return toResult({ out: refusedCode, failed: false });
       const warm = await ensureWarm(signal);
       if (warm) return toResult(warm);
+      // The same door as nb_add_cell, and the likelier one for this: the
+      // souvenir bounce asks the tutor to rewrite a cell the extension has
+      // already quoted, and a rewrite that re-types the quote from memory is
+      // how the student's punctuation got tidied in the first place.
+      const edited = stripUnbackedAskedLines(params.code, [
+        ...allStudentMessages(lastCtx),
+        ...pickedTexts(pickedAnswers),
+      ]);
       const code =
         `import marimo._code_mode as cm\n` +
         `async with cm.get_context() as ctx:\n` +
@@ -6103,9 +6508,16 @@ export default function (pi: ExtensionAPI) {
         `        print("EDIT FAILED: no cell named", ${py(params.name)})\n` +
         `        print("Existing cells:", [n for n in _names if n and n != "_"])\n` +
         `    else:\n` +
-        `        ctx.edit_cell(${py(params.name)}, ${py(stripRedundantImports(params.code))})\n` +
+        `        ctx.edit_cell(${py(params.name)}, ${py(stripRedundantImports(edited.code))})\n` +
         `        ctx.run_cell(${py(params.name)})\n`;
-      return toResult(await runKernel(code, signal));
+      const editResult = await runKernel(code, signal);
+      if (!editResult.failed && edited.removed.length) {
+        editResult.out +=
+          `\nNOTE — a "You asked" line was left out: nothing the student typed or picked ` +
+          `contains ${edited.removed.map((q) => `“${q}”`).join(", ")}. That line is the ` +
+          `extension's to write, from their own words.`;
+      }
+      return toResult(editResult);
     },
     ...quiet("Tidying something on your whiteboard…"),
   });
@@ -6184,6 +6596,11 @@ export default function (pi: ExtensionAPI) {
       expressions: Type.Array(Type.String(), { description: "Python expressions to evaluate." }),
     }),
     async execute(_id, params, signal) {
+      // This tool wraps every expression in `eval`, so it reaches the same
+      // place nb_run does — in one call rather than four. Guarding nb_run
+      // alone would have moved the hole one tool to the left.
+      const refused = kernelGuard((params.expressions ?? []).join("\n"));
+      if (refused) return toResult({ out: refused, failed: false });
       const warm = await ensureWarm(signal);
       if (warm) return toResult(warm);
       const code =
@@ -6365,14 +6782,63 @@ export default function (pi: ExtensionAPI) {
     ...quiet("Looking at your photo…"),
   });
 
+  // ── nb_notebook_url ───────────────────────────────────────────────────────
+  // "Where is the notebook?" had no answer, and what the tutor did with the
+  // gap was invent one: a live run told the student to run `marimo edit
+  // notebook.py` in a new terminal, and doubled down when pressed. That starts
+  // a SECOND server — measured, on :2719, while the toolkit's own held :2718 —
+  // so the student ends up watching a page no nb_* call ever writes to, with
+  // two kernels open on one file. Three of three submitted sessions opened
+  // with a student who could not find their notebook.
+  //
+  // The address is a fact this process has had all along. A tool is the shape
+  // that makes it reachable at the moment the question is asked.
+  pi.registerTool({
+    name: "nb_notebook_url",
+    label: "Where the notebook is",
+    description:
+      "The address of the student's notebook page, and a reopen. Use it the moment they say " +
+      "they cannot see the notebook, or ask where it is, or what to open. " +
+      "NEVER tell a student to start the notebook themselves — no `marimo edit`, no second " +
+      "terminal: this toolkit runs the server, and a second one is a corrupted session whose " +
+      "page nothing you build ever reaches.",
+    promptSnippet: "Give the student the notebook's address (and reopen the page)",
+    parameters: Type.Object({ status: STATUS_PARAM }),
+    async execute() {
+      const r = await marimoUrl();
+      if (!r.url) {
+        return toResult({
+          out:
+            `The notebook server is not up (${r.error ?? "no address yet"}). Tell them in one ` +
+            `warm sentence that the whiteboard needs a moment, and keep teaching here. Do NOT ` +
+            `ask them to start it themselves.`,
+          failed: false,
+        });
+      }
+      const url = `${r.url}/?view-as=present`;
+      // Puts the page back if the tab was closed — rate-limited inside.
+      reopenPage();
+      return toResult({
+        out:
+          `The notebook is at ${url} — say that address to them, in one sentence, exactly as ` +
+          `it is written. It is already running; there is nothing for them to start or install.`,
+        failed: false,
+      });
+    },
+    ...quiet("Finding your notebook…"),
+  });
+
   // ── nb_run ────────────────────────────────────────────────────────────────
   pi.registerTool({
     name: "nb_run",
     label: "Run Python in notebook kernel",
     description:
-      "Escape hatch: run arbitrary Python in the notebook's scratchpad (variables visible, new " +
+      "Escape hatch: run Python in the notebook's scratchpad (variables visible, new " +
       "top-level bindings discarded). Use for: appending to the session log, saving uploaded " +
       "photo bytes to session_artifacts/, timestamps (datetime), quick computations. " +
+      "NOT a shell: code that reaches the operating system (subprocess, socket, os.environ, " +
+      "eval/exec of assembled strings) is refused before it runs — you have no shell here, " +
+      "deliberately. For the notebook's address use nb_notebook_url. " +
       "NOT for creating/editing cells — use nb_add_cell/nb_edit_cell for that. " +
       "AND NEVER TO PRE-SOLVE THE OPEN CHECKPOINT: a live run worked out a checkpoint's " +
       "own arithmetic here and said the answer in the next breath, so the student never " +
@@ -6384,6 +6850,10 @@ export default function (pi: ExtensionAPI) {
       code: Type.String({ description: "Python code to run in the scratchpad." }),
     }),
     async execute(_id, params, signal) {
+      // The bash strip is only as strong as the tools left standing, and this
+      // is the one that was standing. See kernelGuard.
+      const refused = kernelGuard(params.code);
+      if (refused) return toResult({ out: refused, failed: false });
       const result = await runKernel(params.code, signal);
       // Hand-written log JSON is obsolete and drifts (schema, timestamps,
       // paraphrased answers) — redirect to the tool that owns the record.

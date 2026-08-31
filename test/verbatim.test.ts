@@ -22,7 +22,14 @@ import {
   isFillerMessage,
   matchDetourQuestion,
   normMsg,
+  notebookBanner,
+  answerCountForGate,
+  pickIsMechanics,
+  quoteIsBacked,
   repairQuotes,
+  rewriteRivalServer,
+  souvenirVerdict,
+  stripUnbackedAskedLines,
   scriptedQuestionCount,
   slotDrift,
   slotMarkers,
@@ -499,9 +506,15 @@ test("anything they typed still wins", () => {
 // capturePick — which dialog answers reach the graded record
 // ---------------------------------------------------------------------------
 
-const dialog = (answer: string) => ({
+/**
+ * The real shape, copied from a live session file:
+ *   details.answers[] = {questionIndex, question, kind, answer}
+ * The `question` is what tells a prediction about seven bridges from "did the
+ * page open?", and capturePick used to throw it away.
+ */
+const dialog = (answer: string, question = "") => ({
   toolName: "ask_user_question",
-  details: { answers: [{ answer }] },
+  details: { answers: [{ questionIndex: 0, question, kind: "option", answer }] },
 });
 
 /** What the dialog package hands back when nothing structured is attached. */
@@ -516,10 +529,12 @@ const envelope = (question: string, answer: string) => ({
 });
 
 test("a lesson pick is stored", () => {
-  assert.deepEqual(capturePick(dialog("no, it's impossible"), false), {
-    picked: "no, it's impossible",
-    resumeAnswered: false,
-  });
+  const r = capturePick(dialog("no, it's impossible"), false);
+  assert.equal(r.picked, "no, it's impossible");
+  assert.equal(r.resumeAnswered, false);
+  assert.deepEqual(r.picks, [
+    { question: "", answer: "no, it's impossible", mechanics: false },
+  ]);
 });
 
 test("a tool that is not the dialog contributes nothing", () => {
@@ -530,6 +545,7 @@ test("the resume choice is kept out of the record, and disarms the flag", () => 
   // Both labels the resume brief tells the model to use, word for word.
   for (const label of ["Continue where we left off", "Start fresh"]) {
     assert.deepEqual(capturePick(dialog(label), true), {
+      picks: [],
       picked: null,
       resumeAnswered: true,
     });
@@ -562,20 +578,343 @@ test("an answer containing its own quotation marks survives the envelope", () =>
   );
 });
 
-test(
-  "a mechanics dialog the tutor improvised does not become the student's prediction",
-  { todo: "pi-pair-notebook#6 — only the resume dialog is filtered" },
-  () => {
-    // maleynet, m01, 2026-08-25. The notebook had not opened; they typed "can
-    // we restart? i did not see the browser open", the tutor improvised a
-    // picker, and its answer was filed in cp1_bridges' student_picked beside
-    // their actual guess:
-    //
-    //   "student_picked": ["Yes, but only from the right starting point",
-    //                      "Found it — I can see the city now"]
-    //
-    // Nothing about this dialog is a lesson answer. It matches none of the
-    // resume words, so nothing stops it.
-    assert.equal(capturePick(dialog("Found it — I can see the city now"), false).picked, null);
-  },
-);
+test("a mechanics dialog the tutor improvised does not become the student's prediction", () => {
+  // maleynet, m01, 2026-08-25. The notebook had not opened; they typed "can
+  // we restart? i did not see the browser open", the tutor improvised a
+  // picker, and its answer was filed in cp1_bridges' student_picked beside
+  // their actual guess:
+  //
+  //   "student_picked": ["Yes, but only from the right starting point",
+  //                      "Found it — I can see the city now"]
+  //
+  // Nothing about this dialog is a lesson answer, and no blacklist of ANSWERS
+  // could ever have known: the tutor improvised the words. The question is
+  // what gives it away.
+  const r = capturePick(
+    dialog("Found it — I can see the city now", "Did the notebook page open in your browser?"),
+    false,
+  );
+  assert.equal(r.picked, null, "it must not be filed as a lesson answer");
+  assert.deepEqual(
+    r.picks.map((p) => p.mechanics),
+    [true],
+  );
+});
+
+test("a mechanics pick is kept, not dropped", () => {
+  // "Found it — I can see the city now" is the best evidence in that whole
+  // submission that the notebook never opened by itself. It belongs in the
+  // record — just not as an answer to the bridge puzzle.
+  const r = capturePick(
+    dialog("Found it — I can see the city now", "Can you see the page now, or is it blank?"),
+    false,
+  );
+  assert.equal(r.picks.length, 1);
+  assert.equal(r.picks[0].answer, "Found it — I can see the city now");
+});
+
+test("a lesson question that mentions the apparatus is still a lesson question", () => {
+  // Every one of these is a shape this course really asks. Filing one as
+  // machinery would take the student's own answer out of student_picked and
+  // out of the *You chose:* line in the notebook they submit — the expensive
+  // direction, and the reason the classifier fails open.
+  for (const q of [
+    "Look at your notebook — does the walk work?",
+    "Does the graph on your screen show a triangle?",
+    "Can you find a route on the page that crosses every bridge once?",
+    "Königsberg has seven bridges. Do you think a walk exists that crosses each one exactly once?",
+    "How many lines do you have to walk along to get from A to B?",
+    "Open the picture in your notebook — which dot has the most lines?",
+    "In the notebook, is the new drawing the same shape as the old one?",
+    "Look at the whiteboard — did the pattern change?",
+    "Should we restart the counting from a different dot?",
+    "Now that the picture has appeared, what do you notice about the dots?",
+  ]) {
+    assert.equal(pickIsMechanics(q, "yes"), false, q);
+  }
+});
+
+test("the apparatus questions are machinery", () => {
+  for (const q of [
+    "Did the notebook page open in your browser?",
+    "Is the page blank, or can you see the city?",
+    "Did the browser tab load?",
+    "Shall we restart the terminal?",
+    "Can you see the notebook now, or is it still blank?",
+    "Is the notebook open in your browser?",
+  ]) {
+    assert.equal(pickIsMechanics(q, "yes"), true, q);
+  }
+});
+
+test("a figure in the exchange keeps it a lesson answer", () => {
+  // Whatever the wording, an exchange carrying a number carried graded
+  // content: "about 20" is the answer that refused cp1's honest record twice
+  // when picks were left out of the pool.
+  assert.equal(pickIsMechanics("Did the page open with all 7 bridges?", "yes"), false);
+  assert.equal(pickIsMechanics("Did the page open?", "yes, all 7 are there"), false);
+});
+
+test("with no question there is nothing to judge, so it stays a lesson answer", () => {
+  assert.equal(capturePick(dialog("Found it — I can see the city now"), false).picked, "Found it — I can see the city now");
+});
+
+test("the envelope's question is used too, not just thrown away", () => {
+  const r = capturePick(
+    envelope("Did the notebook page open in your browser?", "yes, I see it now"),
+    false,
+  );
+  assert.equal(r.picked, null);
+  assert.equal(r.picks[0].question, "Did the notebook page open in your browser?");
+});
+
+test("a two-question dialog splits into two records", () => {
+  const r = capturePick(
+    {
+      toolName: "ask_user_question",
+      details: {
+        answers: [
+          { questionIndex: 0, question: "Did the page open?", kind: "option", answer: "yes" },
+          {
+            questionIndex: 1,
+            question: "Do you think such a walk exists?",
+            kind: "option",
+            answer: "no, it's impossible",
+          },
+        ],
+        cancelled: false,
+      },
+    },
+    false,
+  );
+  assert.equal(r.picked, "no, it's impossible");
+  assert.deepEqual(
+    r.picks.map((p) => p.mechanics),
+    [true, false],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// quoteIsBacked — a "You asked" line the student never said
+// ---------------------------------------------------------------------------
+
+test("a question composed by the model is not backed", () => {
+  // maleynet, m01, notebook.py:1405. The souvenir reads
+  //   > 🧭 **You asked:** "Wait no we would visit twice more because 4 is
+  //     even... Odd numbers pair off to one extra, that means one extra visit,
+  //     so three visits total?"
+  // and the whole capture window for that detour is these five messages. Not
+  // one of them is that sentence.
+  const said = [
+    "A repeats a street\nB repeats a stop\nC repeats nada",
+    "need all to have even degree",
+    "C repeats nothing, but it misses 2 streets.",
+    "B, however it also misses a street.",
+    "None of them cross every bridge once. Not A,B, or C. Are you asking about the eulerian definitions? Do you mean an Euler trail?",
+  ];
+  assert.equal(
+    quoteIsBacked(
+      "Wait no we would visit twice more because 4 is even... Odd numbers pair off to one extra, that means one extra visit, so three visits total?",
+      said,
+    ),
+    false,
+  );
+});
+
+test("their own words are backed, punctuation and all", () => {
+  const said = ["whats this called again", "ok so, is a trail the same as a circuit?"];
+  assert.equal(quoteIsBacked("is a trail the same as a circuit?", said), true);
+  assert.equal(quoteIsBacked("whats this called again", said), true);
+});
+
+test("a dialog answer backs a quote as much as a typed message does", () => {
+  // A dialog takes over the keyboard, so a question typed into one never
+  // reaches the transcript. Leaving picks out of a pool has refused honest
+  // records here twice.
+  assert.equal(quoteIsBacked("is it about 20", ["hmm", "is it about 20"]), true);
+});
+
+test("with nothing to check against, the check stands down", () => {
+  // A transcript we cannot read must never accuse.
+  assert.equal(quoteIsBacked("anything at all", []), true);
+  assert.equal(quoteIsBacked("anything at all", ["", "  "]), true);
+});
+
+test("a script normMsg cannot see is not called a fabrication", () => {
+  // normMsg strips every non-ASCII character, so this would normalise to ""
+  // on both sides. It must stand down rather than suppress every quote in a
+  // session typed in Japanese.
+  assert.equal(quoteIsBacked("オイラー路ってなに？", ["こんにちは", "オイラー路ってなに？"]), true);
+  assert.equal(quoteIsBacked("これはなんですか", ["こんにちは"]), true);
+});
+
+// ---------------------------------------------------------------------------
+// stripUnbackedAskedLines — the other door into the same fabrication
+// ---------------------------------------------------------------------------
+
+test("an unbacked You asked line is taken out of a cell body", () => {
+  const code = [
+    'mo.md(r"""',
+    "> 🧭 **You asked:** “so three visits total?”",
+    "",
+    "Here is the idea.",
+    '""")',
+  ].join("\n");
+  const r = stripUnbackedAskedLines(code, ["need all to have even degree"]);
+  assert.deepEqual(r.removed, ["so three visits total?"]);
+  assert.ok(!r.code.includes("You asked"));
+  assert.ok(r.code.includes("Here is the idea."));
+  // The literal is still balanced — the delimiters were never touched.
+  assert.equal((r.code.match(/"""/g) ?? []).length, 2);
+});
+
+test("a backed You asked line is left exactly where it is", () => {
+  const code = 'mo.md(r"""\n> 🧭 **You asked:** “what is a trail?”\n\nAn answer.\n""")';
+  assert.deepEqual(stripUnbackedAskedLines(code, ["what is a trail?"]), { code, removed: [] });
+});
+
+test("the quote is removed as a SEGMENT, so the delimiters survive", () => {
+  // THE shape that matters, and the one a line-based strip cannot touch: the
+  // marker and the closing `"""` share a line. A first version of this refused
+  // any line holding a delimiter — correct in itself, and it meant the guard
+  // never fired on the only shape the model actually writes.
+  for (const code of [
+    'mo.md(r"""> 🧭 **You asked:** “never said this”""")',
+    'mo.vstack([mo.md(r"""> 🧭 **You asked:** “never said this”\n\nthe idea"""), netviz(e)])',
+  ]) {
+    const r = stripUnbackedAskedLines(code, ["something else"]);
+    assert.deepEqual(r.removed, ["never said this"]);
+    assert.ok(!r.code.includes("You asked"), r.code);
+    // Every delimiter the cell had, it still has.
+    assert.equal((r.code.match(/"""/g) ?? []).length, (code.match(/"""/g) ?? []).length);
+    assert.ok(r.code.startsWith("mo."), r.code);
+  }
+});
+
+test("with an empty transcript nothing is removed", () => {
+  const code = '\n> 🧭 **You asked:** “never said this”\n';
+  assert.deepEqual(stripUnbackedAskedLines(code, []).removed, []);
+});
+
+// ---------------------------------------------------------------------------
+// souvenirVerdict — both faults, not the first one
+// ---------------------------------------------------------------------------
+
+test("a prose-only souvenir no longer hides an unquoted one", () => {
+  // xi-io's detour_terminology and detour_trail_circuit: markdown tables, so
+  // `shows` is false, so `gap` said "is prose only" and the missing quote was
+  // never mentioned anywhere — not in the bounce, not on the row.
+  const v = souvenirVerdict({ missing: false, proseOnly: true, unquoted: true });
+  assert.match(v.gap, /never quotes the question/);
+  assert.match(v.gap, /prose only/);
+  // The quote clause comes first: being second is how it got swallowed.
+  assert.ok(v.gap.indexOf("never quotes") < v.gap.indexOf("prose only"));
+});
+
+test("a missing cell says only that", () => {
+  const v = souvenirVerdict({ missing: true, proseOnly: true, unquoted: true });
+  assert.equal(v.gap, "does not exist in the notebook");
+});
+
+test("a souvenir with a picture and a quote has no gap", () => {
+  assert.equal(souvenirVerdict({ missing: false, proseOnly: false, unquoted: false }).gap, "");
+});
+
+// ---------------------------------------------------------------------------
+// answerCountForGate — a detour's turns are not answers to the checkpoint
+// ---------------------------------------------------------------------------
+
+const gateWindow = (said: string[], spans: [number, number][], response = "") => ({
+  said,
+  response,
+  detourSpans: spans,
+  detourAsked: new Set<string>(),
+});
+
+test("a detour taken mid-checkpoint is not counted as answers", () => {
+  // The live run: four messages during cp2_abstraction, two of them a logged
+  // detour. The script asks 2 questions, so the raw count of 4 tripped a
+  // refusal that asked the tutor to write down hints that never happened.
+  const said = [
+    "the distances dont matter",
+    "wait what is a multigraph?",
+    "can you write that down for me",
+    "just the connections then",
+  ];
+  assert.equal(answerCountForGate(gateWindow(said, [[1, 2]])), 2);
+  // Without the span it is the old number, which is the bug.
+  assert.equal(answerCountForGate(gateWindow(said, [])), 4);
+});
+
+test("the gate still fires on the close that came too late", () => {
+  // The founding case: cp2_distance walked pair by pair, then the student
+  // answered the NEXT checkpoint's question too, and all nine lines landed in
+  // one row logged `pass` with zero hints. No detour, so nothing is subtracted.
+  const said = [
+    "A to B is 1", "A to C is 2", "A to D is 2", "B to C is 1", "B to D is 1",
+    "C to D is 1", "so 7/6", "can you just tell me the answer?",
+    "the A-D one is the tallest bar",
+  ];
+  assert.ok(answerCountForGate(gateWindow(said, [])) > 2);
+});
+
+test("acknowledgements are not answers the tutor asked for", () => {
+  assert.equal(answerCountForGate(gateWindow(["2", "ok", "7/6"], [])), 2);
+});
+
+// ---------------------------------------------------------------------------
+// The notebook's address
+// ---------------------------------------------------------------------------
+
+test("the banner carries the address and no command", () => {
+  const b = notebookBanner("http://localhost:2718/?view-as=present", true);
+  assert.match(b, /http:\/\/localhost:2718\/\?view-as=present/);
+  // The one thing it must never do is tell a student to start the notebook.
+  assert.ok(!/marimo\s+(edit|run)|pip install|uvx/.test(b));
+});
+
+test("a guessed address is not printed at all", () => {
+  // marimoBase() falls back to 127.0.0.1:2718, and the port often is not that.
+  assert.equal(notebookBanner("", true), "");
+  assert.equal(notebookBanner("Binary file matches", true), "");
+});
+
+test("the rival-server instruction is rewritten before the student reads it", () => {
+  // Measured, live: this exact advice starts a second server on :2719 while
+  // the toolkit's own holds :2718.
+  const said = "Open a new terminal window (not this one), and in it type:\n```\nmarimo edit notebook.py\n```\nThat will open the page.";
+  const r = rewriteRivalServer(said, "http://localhost:2718/?view-as=present");
+  assert.ok(!/marimo edit/.test(r.text));
+  assert.match(r.text, /localhost:2718/);
+  assert.deepEqual(r.hits, ["marimo edit notebook.py"]);
+});
+
+test("a rival PORT is corrected, and our own is left alone", () => {
+  const r = rewriteRivalServer(
+    "It printed http://localhost:2719 — open that.",
+    "http://localhost:2718/?view-as=present",
+  );
+  assert.match(r.text, /localhost:2718/);
+  assert.ok(!/2719/.test(r.text));
+  const ours = rewriteRivalServer(
+    "Your notebook is at http://localhost:2718/?view-as=present",
+    "http://localhost:2718/?view-as=present",
+  );
+  assert.deepEqual(ours.hits, []);
+});
+
+test("honest prose is not touched", () => {
+  // setup/setup-pi.mjs really does tell a student to open a new terminal, for
+  // a good reason. Matching phrasing rather than a command is the shape of fix
+  // this repo has already deleted once (NARRATES_A_BUILD, f8fe8f2).
+  const ok = "Open a new terminal and re-run me.";
+  assert.deepEqual(rewriteRivalServer(ok, "http://localhost:2718/?view-as=present"), {
+    text: ok,
+    hits: [],
+  });
+});
+
+test("with no address of our own, nothing is rewritten", () => {
+  const t = "run marimo edit notebook.py";
+  assert.deepEqual(rewriteRivalServer(t, ""), { text: t, hits: [] });
+});

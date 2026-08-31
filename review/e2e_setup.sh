@@ -236,6 +236,18 @@ fi
 # tutor started. A student's pi has no such flag. If the strip regresses, the
 # gate must be the thing that notices.
 #
+# AND "no bash" was still the wrong question. The strip is only as strong as
+# the tools left standing, and nb_run — "run arbitrary Python" — was standing:
+# a live run reasoned "I can't run shell" and then ran
+# `subprocess.run(['lsof','-nP','-iTCP','-sTCP:LISTEN'])` through it, reading
+# every listening service on the machine back into the tutor's context. The
+# code is refused in Node now, before the kernel call, at every tool that runs
+# model-authored Python (nb_run, nb_read, nb_add_cell, nb_edit_cell,
+# nb_add_exercise) — see lib/pysrc.ts scanKernelCode, and `npm test` for the
+# cases. D8 has to be read as "no tool reached the operating system", not "the
+# bash tool is absent": the second is what the gate could see, and it is why
+# this was invisible.
+#
 # --no-extensions keeps the MACHINE's global extensions out, but it also
 # stops pi discovering the packages the module declares in .pi/settings.json
 # — and one of those is ask_user_question, the dialog the scripts require for

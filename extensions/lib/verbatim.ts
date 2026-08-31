@@ -263,6 +263,37 @@ export function chooseQuotedWithFallback(
 }
 
 /**
+ * How many of this checkpoint's messages are ANSWERS to it — the number the
+ * late-close gate compares against the script's question count.
+ *
+ * It used to be `said.length`, the raw window, and a student who asked one
+ * question mid-checkpoint tripped a refusal whose prescribed remedy was to
+ * write down hints that never happened: measured in a live run, on a
+ * checkpoint answered correctly first try on turns 1 and 3 with a logged
+ * detour in between. A curious student is the one this module wants, and the
+ * gate degraded their record for it.
+ *
+ * The SAME narrowing the note cell uses, from the same function, so the two
+ * can never disagree again about what counts as an answer here — that
+ * disagreement is how the bug existed at all. `cut` is deliberately 0: the
+ * pre-question narrowing must NOT be applied. Messages typed before this
+ * checkpoint's first question are the PREVIOUS checkpoint's tail sitting in a
+ * window nobody reset, which is not noise around a late close — it IS the late
+ * close, the founding case this gate was built for.
+ *
+ * Subtracting can only ever turn a refusal OFF, never on, which is the one
+ * direction this file's history of withdrawn guards allows a count to move.
+ */
+export function answerCountForGate(w: {
+  said: string[];
+  response: string;
+  detourSpans: [number, number][];
+  detourAsked: Set<string>;
+}): number {
+  return chooseQuoted({ ...w, cut: 0, dropDetours: true }).keep.length;
+}
+
+/**
  * A model-filled slot describes a picture, so its prose is the tutor's.
  * Anything it puts in QUOTATION MARKS is still the student's, and a live run
  * put three different spellings of one sentence into the record —
@@ -396,6 +427,151 @@ export function withQuotedQuestion(
   return `${quote}\n\n${markdown}`;
 }
 
+/**
+ * Is this quote something the student actually typed?
+ *
+ * `snapToTranscript` is a REPAIR, and it returns null for two situations that
+ * are indistinguishable at its call site: the text is already verbatim in the
+ * transcript (nothing to repair), and nothing in the transcript resembles it
+ * at all (nothing to repair WITH). The second falls through to the model's own
+ * string, which then goes into the student's notebook under **You asked**. A
+ * submitted m01 notebook carries a whole sentence of reasoning that way —
+ * "Odd numbers pair off to one extra, that means one extra visit, so three
+ * visits total?" — that its student never typed. Per REVIEWING.md, corrupting
+ * the graded record is a Blocker.
+ *
+ * Plain containment, and no threshold. Every repair in this file already ends
+ * in a REAL message (snapToTranscript returns one; matchDetourQuestion's
+ * upgrade returns `said[index]`), so on every honest path this is a no-op —
+ * which is exactly why it can be acted on where the four meaning-judging
+ * guards this file records had to be withdrawn. "Does any message contain this
+ * string" is decidable; "is this a fair paraphrase" is not.
+ *
+ * It STANDS DOWN on an empty pool, like every other check here: with nothing to
+ * check against there is nothing to conclude, and a transcript we cannot read
+ * must never accuse. normMsg erases every non-ASCII script, so a student
+ * typing Japanese or Cyrillic normalises to "" and stands down too — with a
+ * looser fallback below it so their quotes can still be BACKED rather than
+ * merely unjudged.
+ */
+export function quoteIsBacked(quote: string, pool: string[]): boolean {
+  const q = normMsg(quote);
+  const pooled = pool.map((m) => normMsg(m)).filter(Boolean);
+  if (!q || !pooled.length) return true;
+  if (pooled.some((m) => m.includes(q))) return true;
+  // Punctuation-only normalisation, which keeps scripts normMsg drops.
+  const loose = (s: string) =>
+    s.toLowerCase().replace(/['‘’ʼ"“”]/g, "").replace(/\s+/g, " ").trim();
+  const lq = loose(quote);
+  return !!lq && pool.some((m) => loose(m).includes(lq));
+}
+
+/**
+ * The marker this toolkit owns. A student never types it; the extension writes
+ * it, and `withQuotedQuestion` is the only thing that should.
+ */
+export const ASKED_LINE = /^[ \t]*>?[ \t]*🧭[ \t]*\*\*You asked:?\*\*/;
+
+/**
+ * The quote AS A SEGMENT, not as a line.
+ *
+ * A line test is the obvious way to write this and it does not work: the shape
+ * the model actually produces is
+ *
+ *     mo.md(r\"\"\"> 🧭 **You asked:** “…”\n\n…\"\"\")
+ *
+ * where the marker and the closing `\"\"\"` share a line — so a strip that
+ * refuses any line holding a string delimiter (as it must, or it can unbalance
+ * the source) never fires on the one shape it was written for. Matching the
+ * marker plus its quoted span removes only text that provably contains no
+ * delimiter, wherever on the line it sits.
+ */
+const ASKED_SEGMENT = />?[ \t]*🧭[ \t]*\*\*You asked:?\*\*[ \t]*[“"]([^”"]*)[”"][ \t]*/g;
+
+/**
+ * Take a **You asked** line the MODEL wrote out of a cell body before that
+ * cell exists.
+ *
+ * The other door into the same Blocker. log_detour's own bounce text used to
+ * hand the model the literal template —
+ *   mo.vstack([mo.md(r\"\"\"> 🧭 **You asked:** “…”  …
+ * — and a cell built from it satisfies the "is the question quoted?" check
+ * with the model's own wording, so the extension's quoting path never runs and
+ * the fabricated sentence ships. That template is gone from the bounces now;
+ * this is the mechanism behind it, and it works on any cell body the model
+ * hands to nb_add_cell or nb_edit_cell.
+ *
+ * WHOLE LINES ONLY, and never a line carrying a Python string delimiter. The
+ * quote sits inside a triple-quoted markdown literal, so dropping a complete
+ * interior line cannot unbalance the source — but a line that holds `\"\"\"`
+ * can, and this file already records what string surgery on cell source cost
+ * once ("produced unparseable source for a multi-line netviz(...) call"). A
+ * line it cannot remove safely is left exactly where it is.
+ */
+export function stripUnbackedAskedLines(
+  code: string,
+  pool: string[],
+): { code: string; removed: string[] } {
+  const removed: string[] = [];
+  const out = code.replace(ASKED_SEGMENT, (whole, quoted: string) => {
+    // Belt and braces. The capture group cannot contain a `"` at all, so this
+    // can only fire on a pathological `'''`; keeping the segment is always the
+    // safe answer, because unparseable Python in a student's notebook is worse
+    // than a quote that has to be reported instead of removed.
+    if (/"""|'''/.test(whole)) return whole;
+    if (!quoted.trim()) return whole; // nothing attributed, nothing to disprove
+    if (quoteIsBacked(quoted, pool)) return whole;
+    removed.push(quoted.trim());
+    return "";
+  });
+  // What is left where the quote was is a blank line inside a markdown
+  // literal, which renders as nothing. The cell is not otherwise touched: a
+  // strip that also tidied would be editing the tutor's prose, and this is
+  // allowed to remove exactly one thing.
+  return { code: removed.length ? out : code, removed };
+}
+
+// ---------------------------------------------------------------------------
+// What a souvenir cell is missing
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything wrong with a detour souvenir, rather than the first thing.
+ *
+ * `gap` was one string and `!shows` won the ternary, so a markdown-table
+ * souvenir always reported "is prose only" and a MISSING QUOTE was never
+ * mentioned — not in the bounce, not on the row. Two of one student's three
+ * souvenirs shipped with the tutor's paraphrase of their question instead of
+ * their words, and nothing anywhere said so. The student had asked for tables
+ * and no figures, which is a reasonable thing to want; it should not also cost
+ * them the record of their own question.
+ *
+ * The QUOTE clause comes first because it is the graded-record fault of the
+ * two, and because being second is how it got swallowed.
+ */
+export interface SouvenirVerdict {
+  /** No such cell in the notebook — nb_edit_cell cannot make one. */
+  missing: boolean;
+  /** Nothing to look at or play with. */
+  proseOnly: boolean;
+  /** The question it answers is not in it. */
+  unquoted: boolean;
+  /** The one line for the bounce and for `souvenir_gap` on the row. */
+  gap: string;
+}
+
+export function souvenirVerdict(v: {
+  missing: boolean;
+  proseOnly: boolean;
+  unquoted: boolean;
+}): SouvenirVerdict {
+  const parts: string[] = [];
+  if (v.missing) return { ...v, gap: "does not exist in the notebook" };
+  if (v.unquoted) parts.push("never quotes the question it answers");
+  if (v.proseOnly) parts.push("is prose only — nothing to look at or play with");
+  return { ...v, gap: parts.join(", and ") };
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint ids
 // ---------------------------------------------------------------------------
@@ -477,14 +653,88 @@ export const isDialogSentinel = (s: string): boolean =>
  */
 const RESUME_ANSWER = /continue|fresh|left off|pick (things )?up/i;
 
+/**
+ * The machinery half of a dialog, decided on the QUESTION the tutor asked.
+ *
+ * The answer cannot decide this. "Found it — I can see the city now" is the
+ * answer to "did the page open?" and it is also a perfectly good answer to a
+ * question about Königsberg; RESUME_ANSWER only works at all because the resume
+ * brief dictates the words. Everything else the tutor raises it improvises, so
+ * a blacklist of answers can never extend to it. The question is in the tool
+ * result — `details.answers[].question`, confirmed against live session files
+ * — and it is the tutor's own sentence, not the student's, so a word list here
+ * cannot delete a student's words the way one over their answers could.
+ *
+ * TIGHT ON PURPOSE, and it fails open. A machinery NOUN and a machinery STATE
+ * word must BOTH be present, and both lists are deliberately small: the
+ * expensive direction is filing a lesson answer as machinery, because that
+ * takes the student's own answer out of `student_picked` and out of the
+ * *You chose:* line in their notebook. Anything this cannot place stays a
+ * lesson answer, which is what every dialog was before this existed.
+ *
+ * The shapes that must NOT match, all of them things this course really asks:
+ *   "Look at your notebook — does the walk work?"        (no machinery noun)
+ *   "Does the graph on your screen show a triangle?"     (no machinery noun)
+ *   "Can you find a route on the page that crosses …?"   (no machinery state)
+ */
+const MACHINERY_THING =
+  /\b(?:notebook|whiteboard|browser|the page|that page|the tab|the link|that link|terminal|marimo)\b/i;
+const MACHINERY_STATE =
+  /\b(?:open|opened|opens|opening|load|loads|loaded|loading|reload|refresh|restart|restarted|blank|appear|appeared|appears|pop(?:ped)? up|came up|come up|visible)\b/i;
+/**
+ * A lesson question that happens to mention the apparatus is still a lesson
+ * question. Paper checkpoints talk about photographs and drawings; a figure
+ * anywhere means the exchange carried graded content.
+ */
+const LESSON_ASK =
+  /\bhow many\b|\bhow much\b|\bwhy\b|\bdo you think\b|\bwhat do you\b|\bpredict\b|\bwhich of\b|\bpaper\b|\bphoto|\bpicture\b|\bdraw/i;
+/**
+ * The continue-or-fresh dialog, seen from the question side — by the exact
+ * words the resume brief dictates, and nothing looser.
+ *
+ * "start fresh" alone is NOT enough: a tutor offering a practice round on new
+ * data says "shall we start fresh with a different city?", and that is a
+ * lesson question whose answer belongs in the record.
+ */
+const RESUME_QUESTION = /where we left off/i;
+
+export function pickIsMechanics(question: string, answer: string): boolean {
+  const q = String(question ?? "");
+  if (!q.trim()) return false; // no question to judge — it stays a lesson answer
+  if (RESUME_QUESTION.test(q)) return true;
+  if (LESSON_ASK.test(q)) return false;
+  // Any digit at all, not isFigure: a bare "7" is deliberately not a figure
+  // elsewhere in this file (a subscript and a dot label tokenize that way),
+  // but "did the page open with all 7 bridges?" is an exchange about the
+  // seven bridges. Erring toward lesson costs nothing; erring the other way
+  // takes a student's answer out of their notebook.
+  if (/\d/.test(`${q} ${answer ?? ""}`)) return false;
+  return MACHINERY_THING.test(q) && MACHINERY_STATE.test(q);
+}
+
+/** One answer to one question of one dialog. */
+export interface PickRecord {
+  /** The tutor's question, when the dialog reported it. */
+  question: string;
+  /** What the student chose or typed. */
+  answer: string;
+  /** Session machinery rather than an answer to the lesson. */
+  mechanics: boolean;
+}
+
 export interface PickCapture {
-  /** The answer to store on the next checkpoint, or null to store nothing. */
+  /** Every answer this dialog produced, question attached, classified. */
+  picks: PickRecord[];
+  /**
+   * The LESSON answers, joined — the value `student_picked` has always held.
+   * Kept as its own field so nothing downstream has to know about the split.
+   */
   picked: string | null;
   /** True when this was the resume choice, so the caller clears its flag. */
   resumeAnswered: boolean;
 }
 
-const NOTHING: PickCapture = { picked: null, resumeAnswered: false };
+const NOTHING: PickCapture = { picks: [], picked: null, resumeAnswered: false };
 
 /**
  * What a finished `ask_user_question` contributes to the graded record.
@@ -498,25 +748,30 @@ export function capturePick(event: any, awaitingResumeChoice: boolean): PickCapt
   // The package supplies the answers structured on the tool result; the
   // envelope sentence is only a fallback. Parsing prose truncated an answer
   // that contained its own quotation marks.
-  const structured = (event?.details?.answers ?? [])
-    .map((a: any) => String(a?.answer ?? a?.value ?? "").trim())
-    .filter((v: string) => v && !isDialogSentinel(v));
+  //
+  // Both shapes carry the QUESTION as well, and both used to throw it away:
+  // details.answers[] is {questionIndex, question, kind, answer} (confirmed
+  // against live session files), and the envelope's own regex already captured
+  // it as group 1. Keeping it is the whole of pi-pair-notebook#6 — it is the
+  // only thing that can tell a prediction about seven bridges from "did the
+  // page open?".
+  const structured: PickRecord[] = (event?.details?.answers ?? [])
+    .map((a: any) => ({
+      question: String(a?.question ?? "").trim(),
+      answer: String(a?.answer ?? a?.value ?? "").trim(),
+    }))
+    .filter((p: PickRecord) => p.answer && !isDialogSentinel(p.answer))
+    .map((p: PickRecord) => ({ ...p, mechanics: pickIsMechanics(p.question, p.answer) }));
   const text = (event?.content ?? [])
     .filter((c: any) => c?.type === "text" && typeof c.text === "string")
     .map((c: any) => c.text)
     .join("\n")
     .trim();
 
-  if (structured.length) {
-    const fromDetails = structured.join(" · ");
-    if (awaitingResumeChoice && RESUME_ANSWER.test(fromDetails)) {
-      return { picked: null, resumeAnswered: true };
-    }
-    return { picked: fromDetails.slice(0, 300), resumeAnswered: false };
-  }
+  if (structured.length) return settlePicks(structured, awaitingResumeChoice);
   if (!text) return NOTHING;
 
-  let picked = text;
+  let picks: PickRecord[] = [];
   try {
     const parsed = JSON.parse(text);
     if (parsed?.cancelled) return NOTHING;
@@ -526,10 +781,14 @@ export function capturePick(event: any, awaitingResumeChoice: boolean): PickCapt
       : answers && typeof answers === "object"
         ? Object.values(answers)
         : [];
-    picked = flat
-      .map((a: any) => (typeof a === "string" ? a : (a?.answer ?? a?.value ?? "")))
-      .filter((v: string) => v && !isDialogSentinel(v))
-      .join(" · ");
+    picks = flat
+      .map((a: any) =>
+        typeof a === "string"
+          ? { question: "", answer: a }
+          : { question: String(a?.question ?? ""), answer: String(a?.answer ?? a?.value ?? "") },
+      )
+      .filter((p: PickRecord) => p.answer && !isDialogSentinel(p.answer))
+      .map((p: PickRecord) => ({ ...p, mechanics: pickIsMechanics(p.question, p.answer) }));
   } catch {
     // Not JSON. The dialog package hands back a sentence of plumbing —
     //   User has answered your questions: "How do you feel about
@@ -542,25 +801,44 @@ export function capturePick(event: any, awaitingResumeChoice: boolean): PickCapt
     // matched lazily up to the quote that ends the pair, so an answer
     // containing its own quotation marks survives instead of being stored
     // truncated to its first word.
-    const pairs = [...text.matchAll(/"([^"]*)"\s*=\s*"([\s\S]*?)"(?=\s*[.,]|\s*$)/g)]
-      .map((m) => m[2].trim())
-      .filter((v) => v && !isDialogSentinel(v));
-    picked = pairs.length ? pairs.join(" · ") : "";
+    picks = [...text.matchAll(/"([^"]*)"\s*=\s*"([\s\S]*?)"(?=\s*[.,]|\s*$)/g)]
+      .map((m) => ({ question: m[1].trim(), answer: m[2].trim() }))
+      .filter((p) => p.answer && !isDialogSentinel(p.answer))
+      .map((p) => ({ ...p, mechanics: pickIsMechanics(p.question, p.answer) }));
   }
 
-  // A dismissed dialog is not an answer. The package returns a fixed "User
-  // declined to answer questions", which is a machine's sentence — stored, it
-  // printed in the submitted record as *You chose: "User declined to answer
-  // questions"*, attributed to the student.
-  //
-  // And it does NOT answer the resume question, so the flag stays armed:
-  // clearing it here meant the RE-ASKED continue-or-fresh answer was stored
-  // instead, which is the same leak one dialog later.
-  if (!picked || isDialogSentinel(picked)) return NOTHING;
-  if (awaitingResumeChoice && RESUME_ANSWER.test(picked)) {
-    return { picked: null, resumeAnswered: true };
+  return settlePicks(picks, awaitingResumeChoice);
+}
+
+/**
+ * The last three decisions, in one place because they have to happen in this
+ * order and each of them has a live failure behind it.
+ *
+ * A dismissed dialog is not an answer. The package returns a fixed "User
+ * declined to answer questions", which is a machine's sentence — stored, it
+ * printed in the submitted record as *You chose: "User declined to answer
+ * questions"*, attributed to the student.
+ *
+ * And it does NOT answer the resume question, so the flag stays armed:
+ * clearing it there meant the RE-ASKED continue-or-fresh answer was stored
+ * instead, which is the same leak one dialog later. The resume test stays on
+ * the ANSWER and stays behind the arming flag, deliberately: the flag is what
+ * makes "Start fresh" safe as a lesson answer once the first checkpoint has
+ * closed, and matching the question instead would swallow a real prediction
+ * from a tutor that offers a practice round "from scratch".
+ */
+function settlePicks(picks: PickRecord[], awaitingResumeChoice: boolean): PickCapture {
+  if (!picks.length) return NOTHING;
+  if (awaitingResumeChoice && picks.some((p) => RESUME_ANSWER.test(p.answer))) {
+    return { picks: [], picked: null, resumeAnswered: true };
   }
-  return { picked: picked.slice(0, 300), resumeAnswered: false };
+  const capped = picks.map((p) => ({ ...p, answer: p.answer.slice(0, 300) }));
+  const lesson = capped.filter((p) => !p.mechanics).map((p) => p.answer);
+  return {
+    picks: capped,
+    picked: lesson.length ? lesson.join(" · ") : null,
+    resumeAnswered: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -709,4 +987,107 @@ export function verbatimFill(
     return answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ");
   }
   return opts.photoAnswered ? "*(answered on paper — the photo is above)*" : response;
+}
+
+// ---------------------------------------------------------------------------
+// Where the notebook is
+// ---------------------------------------------------------------------------
+
+/**
+ * The address of the student's page was spoken ONLY from openInBrowser's
+ * failure branch. On macOS `open <url>` exits 0 the instant it has handed the
+ * URL to a browser, and `cmd /c start` on Windows likewise — so a page that
+ * opened behind the terminal, on another Space, or in a browser nobody was
+ * watching counted as SUCCESS, the failure branch never ran, and nothing ever
+ * said the address out loud.
+ *
+ * All three submitted m01 sessions opened with the student unable to find the
+ * notebook: 21 minutes of one graded session and 22 hours of another spent
+ * hunting for a page that was already running, and a third student typing
+ * "can we restart? i did not see the browser open". The dialog the tutor
+ * improvised in reply is still in that session's graded record.
+ *
+ * The words are here so `npm test` can hold them to the two things that matter:
+ * the line carries the URL, and it never carries a command for the student to
+ * run. An empty url returns an empty banner — a printed guess at the address
+ * is worse than silence, and startMarimo's own comment says the port is often
+ * not the one we would guess.
+ */
+export const NOTEBOOK_BANNER_PREFIX = "📓 Your notebook";
+
+export function notebookBanner(url: string, opened: boolean): string {
+  if (!/^https?:\/\/\S+$/.test(url ?? "")) return "";
+  const tail = "Your tutor runs it for you — there is nothing to install and nothing to start.";
+  return opened
+    ? `${NOTEBOOK_BANNER_PREFIX} is at ${url}\n` +
+        `It should already be open in your browser. If you cannot see it — another window, ` +
+        `another desktop — open that link. ${tail}`
+    : `${NOTEBOOK_BANNER_PREFIX} is at ${url}\n` +
+        `It did not open by itself, so please open that link in your browser now. ${tail}`;
+}
+
+/** The port a URL names, or "" when it names none. */
+export function urlPort(url: string): string {
+  return /^https?:\/\/[^/?#]*?:(\d+)/.exec(url ?? "")?.[1] ?? "";
+}
+
+/**
+ * Take a second marimo server out of the tutor's mouth before the student
+ * reads it.
+ *
+ * Asked where the notebook was, a live tutor told the student to run
+ * `marimo edit notebook.py` in a new terminal, and doubled down when pressed.
+ * Measured in the same sandbox: that starts a SECOND server on :2719 while the
+ * toolkit's own holds :2718. The student then watches a page no nb_* call ever
+ * writes to, with two kernels open on one file, and every cell the tutor
+ * builds lands somewhere they cannot see. They are further from the notebook
+ * than before they asked.
+ *
+ * READ THE HISTORY BEFORE TOUCHING THIS. `NARRATES_A_BUILD` — a regex over the
+ * tutor's phrasing, fired as an invisible note — was deleted in f8fe8f2, and
+ * its epitaph in notebook-tool.ts says that shape "has failed here every
+ * single time" and "could not unsay the sentence". Two things make this
+ * different, and if either stops being true this should go the same way:
+ *
+ *  1. It matches a COMMAND and a PORT NUMBER, not a mood. There is one way to
+ *     write `marimo edit`; there are a thousand ways to say "let me draw".
+ *     `bash` is taken off the tutor at session_start, so a shell command in
+ *     front of a student has no honest use here at all. "new terminal" is
+ *     deliberately NOT matched — setup/setup-pi.mjs tells a student to open
+ *     one, for a good reason, in those words.
+ *  2. It is applied at RENDER time, so it does unsay it: the wrong line never
+ *     reaches the screen. Nothing is refused and no turn is aborted.
+ *
+ * The port half is skipped unless we know our own port. startMarimo's comment
+ * records why: `--sandbox` re-execs and the second process binds again, often
+ * somewhere else, and a rewrite that cannot tell our server from theirs would
+ * replace correct addresses with a guess.
+ */
+// The command and its own arguments — NOT the rest of the line. `[^\n`]*` ate
+// the prose after it ("…and tell me what you see"), so a sentence that gave
+// wrong advice and then said something perfectly good lost both halves.
+const RIVAL_COMMAND =
+  /\b(?:uvx\s+|uv\s+run\s+|python3?\s+-m\s+)?marimo\s+(?:edit|run)(?:\s+(?:--?[\w-]+|[\w./~-]+\.py|[\w./~-]*notebook[\w./~-]*))*/gi;
+const LOCAL_URL =
+  /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::(\d+))?(?:\/[^\s`)\]]*)?/gi;
+
+export function rewriteRivalServer(
+  text: string,
+  present: string,
+): { text: string; hits: string[] } {
+  if (!/^https?:\/\/\S+$/.test(present ?? "")) return { text, hits: [] };
+  const live = urlPort(present);
+  const hits: string[] = [];
+  let out = text.replace(RIVAL_COMMAND, (m) => {
+    hits.push(m.trim());
+    return `open ${present} — it is already running, there is nothing to start`;
+  });
+  if (live) {
+    out = out.replace(LOCAL_URL, (m, port) => {
+      if (port === live) return m;
+      hits.push(m);
+      return present;
+    });
+  }
+  return { text: out, hits };
 }

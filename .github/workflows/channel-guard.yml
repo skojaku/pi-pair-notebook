@@ -47,6 +47,16 @@ jobs:
         with:
           node-version: 24
 
+      # The unit tests. No secrets, no install, under a second — and until now
+      # they ran nowhere but on whoever remembered to type `npm test`. The boot
+      # job below only proves the extension IMPORTS; it says nothing about the
+      # quoting logic that decides what goes into a student's graded record.
+      # test/imports.test.ts is here for a specific reason: it catches a helper
+      # extracted into lib/ whose call site was never swapped, which is a fault
+      # that leaves every test green while the tool runs its own stale copy.
+      - name: Unit tests
+        run: npm test
+
       # Tags resolve, tag and manifest agree, both extensions are listed and
       # present, and the updater is not listed first. Also refuses a channel
       # that walks students backwards — unless the commit says so.

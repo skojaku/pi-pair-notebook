@@ -146,6 +146,13 @@ def main():
         print(f"    student_said_verbatim: {r.get('student_said_verbatim')}")
         if "student_picked" in r:
             print(f"    student_picked: {r['student_picked']}")
+        # The machinery half of the dialogs, question attached. A submitted log
+        # had "Found it — I can see the city now" — the answer to an improvised
+        # "did the page open?" — filed in student_picked beside a real
+        # prediction. It is kept, because it is the best evidence in that
+        # submission that the page never opened; it is just not a lesson answer.
+        if "student_picked_mechanics" in r:
+            print(f"    student_picked_mechanics: {r['student_picked_mechanics']}")
         print(f"    notes: {str(r.get('notes',''))[:200]}")
         flags = {
             k: v
@@ -166,6 +173,11 @@ def main():
                 "closed_without_speaking",
                 "figures_not_quoted",
                 "closed_by_referee",
+                # How many of student_said_verbatim the late-close gate counted
+                # as answers to THIS checkpoint. Present only when a detour ate
+                # some of the window — without it, a quiet gate beside nine
+                # student turns looks like a gate that is not working.
+                "answers_counted",
             )
         }
         if flags:
@@ -175,6 +187,23 @@ def main():
     detours = [r for r in rows if r.get("type") == "detour"]
     for d in detours:
         print(f"  {json.dumps(d)[:300]}")
+        # Two faults the row now names, both of them about the STUDENT'S OWN
+        # QUESTION rather than the souvenir around it. Read them first.
+        #
+        #   question_unsupported — nothing they typed or picked contains this
+        #     question, so no "You asked" line was written anywhere. The row
+        #     keeps the tutor's wording; their notebook does not get it in
+        #     theirs. A tutor-initiated aside is fine — it must not be labelled
+        #     as something they asked.
+        #   souvenir_unquoted — the question IS theirs and both routes to
+        #     putting it in the cell failed. Their keepsake has no record of
+        #     what they asked. This used to hide behind "is prose only".
+        if d.get("question_unsupported"):
+            print("    ⚠ question_unsupported — the quote had no support in the transcript")
+        if d.get("souvenir_unquoted"):
+            print("    ⚠ souvenir_unquoted — their question is not in the souvenir at all")
+        if d.get("souvenir_quote_cell"):
+            print(f"    (quote went in beside the cell, as {d['souvenir_quote_cell']})")
     if not detours:
         print("  (none logged)")
 
@@ -185,6 +214,9 @@ def main():
         for n in names
         if n != "_"
         and n not in known
+        # `<souvenir>_asked` is the extension's own quote cell — the fallback
+        # it writes when it cannot prepend the question into the souvenir. It
+        # is a good sign, not a stray.
         and (n.startswith(cp) or n.startswith("detour_") or n.endswith("_header"))
     ]
     print("  " + (", ".join(extra) if extra else "(none)"))
