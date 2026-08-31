@@ -40,11 +40,11 @@ import { keyHint, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   bigramDice,
   baseCheckpointId,
+  capturePick,
   chooseQuotedWithFallback,
   driftIsReportable,
   editDistanceAtMost,
   fillSlots,
-  isDialogSentinel,
   isFigure,
   isFillerMessage,
   matchDetourQuestion,
@@ -2103,83 +2103,11 @@ let awaitingResumeChoice = false;
 
 function recordPickedAnswer(event: any): void {
   try {
-    if (!/ask.?user.?question/i.test(String(event?.toolName ?? ""))) return;
-
-    // The package supplies the answers structured on the tool result; the
-    // envelope sentence is only a fallback. Parsing prose truncated an
-    // answer that contained its own quotation marks.
-    const structured = (event?.details?.answers ?? [])
-      .map((a: any) => String(a?.answer ?? a?.value ?? "").trim())
-      .filter((v: string) => v && !isDialogSentinel(v));
-    const text = (event?.content ?? [])
-      .filter((c: any) => c?.type === "text" && typeof c.text === "string")
-      .map((c: any) => c.text)
-      .join("\n")
-      .trim();
-    if (structured.length) {
-      const fromDetails = structured.join(" · ");
-      if (
-        !(awaitingResumeChoice && /continue|fresh|left off|pick (things )?up/i.test(fromDetails))
-      ) {
-        pickedAnswers.push(fromDetails.slice(0, 300));
-      } else {
-        awaitingResumeChoice = false;
-      }
-      return;
-    }
-    if (!text) return;
-    let picked = text;
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed?.cancelled) return;
-      const answers = parsed?.answers ?? parsed;
-      const flat = Array.isArray(answers)
-        ? answers
-        : answers && typeof answers === "object"
-          ? Object.values(answers)
-          : [];
-      const joined = flat
-        .map((a: any) => (typeof a === "string" ? a : (a?.answer ?? a?.value ?? "")))
-        .filter((v: string) => v && !isDialogSentinel(v))
-        .join(" · ");
-      picked = joined;
-    } catch {
-      // Not JSON. The dialog package hands back a sentence of plumbing —
-      //   User has answered your questions: "How do you feel about
-      //   Python?"="tried a little". You can now continue …
-      // — and storing that whole sentence put a machine's voice inside the
-      // student's own `*You chose:*` line in the submitted notebook. Keep
-      // only the answers: every "question"="answer" pair's right-hand side.
-      // Per ANSWER, not per sentence: a dialog with two questions where one
-      // was left blank must still record the one that was answered.
-      // The value is matched lazily up to the quote that ends the pair (the
-      // envelope puts a "." or the end of the sentence after it), so an
-      // answer containing its own quotation marks survives instead of being
-      // stored truncated to its first word.
-      const pairs = [...text.matchAll(/"([^"]*)"\s*=\s*"([\s\S]*?)"(?=\s*[.,]|\s*$)/g)]
-        .map((m) => m[2].trim())
-        .filter((v) => v && !isDialogSentinel(v));
-      picked = pairs.length ? pairs.join(" · ") : "";
-    }
-    // The continue-or-fresh answer is session mechanics, not a lesson
-    // answer. Match it by CONTENT rather than "whatever dialog comes first
-    // after a resume": if the tutor asks continue-or-fresh in plain text,
-    // the flag would otherwise swallow the next real prediction instead —
-    // and a re-asked resume dialog would slip the original one through.
-    // A dismissed dialog is not an answer. The package returns a fixed
-    // "User declined to answer questions", which is a machine's sentence —
-    // stored, it printed in the submitted record as *You chose: "User
-    // declined to answer questions"*, attributed to the student.
-    //
-    // And it does NOT answer the resume question, so the flag stays armed:
-    // clearing it here meant the RE-ASKED continue-or-fresh answer was
-    // stored instead, which is the same leak one dialog later.
-    if (!picked || isDialogSentinel(picked)) return;
-    if (awaitingResumeChoice && /continue|fresh|left off|pick (things )?up/i.test(picked)) {
-      awaitingResumeChoice = false;
-      return;
-    }
-    pickedAnswers.push(picked.slice(0, 300));
+    // The decision lives in lib/verbatim.ts, where `npm test` can reach it.
+    // Only the two mutable globals stay here.
+    const r = capturePick(event, awaitingResumeChoice);
+    if (r.resumeAnswered) awaitingResumeChoice = false;
+    if (r.picked) pickedAnswers.push(r.picked);
   } catch {
     // capture is best-effort; never break a turn
   }

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   baseCheckpointId,
   bigramDice,
+  capturePick,
   chooseQuoted,
   chooseQuotedWithFallback,
   driftIsReportable,
@@ -493,3 +494,88 @@ test("anything they typed still wins", () => {
     '"i put it there because"',
   );
 });
+
+// ---------------------------------------------------------------------------
+// capturePick — which dialog answers reach the graded record
+// ---------------------------------------------------------------------------
+
+const dialog = (answer: string) => ({
+  toolName: "ask_user_question",
+  details: { answers: [{ answer }] },
+});
+
+/** What the dialog package hands back when nothing structured is attached. */
+const envelope = (question: string, answer: string) => ({
+  toolName: "ask_user_question",
+  content: [
+    {
+      type: "text",
+      text: `User has answered your questions: "${question}"="${answer}". You can now continue with the user's answers in mind.`,
+    },
+  ],
+});
+
+test("a lesson pick is stored", () => {
+  assert.deepEqual(capturePick(dialog("no, it's impossible"), false), {
+    picked: "no, it's impossible",
+    resumeAnswered: false,
+  });
+});
+
+test("a tool that is not the dialog contributes nothing", () => {
+  assert.equal(capturePick({ toolName: "nb_add_cell" }, false).picked, null);
+});
+
+test("the resume choice is kept out of the record, and disarms the flag", () => {
+  // Both labels the resume brief tells the model to use, word for word.
+  for (const label of ["Continue where we left off", "Start fresh"]) {
+    assert.deepEqual(capturePick(dialog(label), true), {
+      picked: null,
+      resumeAnswered: true,
+    });
+  }
+});
+
+test("the same words are a real answer once the resume is behind us", () => {
+  // The flag is what makes them mechanics; the words alone must not be.
+  assert.equal(capturePick(dialog("Start fresh"), false).picked, "Start fresh");
+});
+
+test("a dismissed dialog is not an answer", () => {
+  assert.equal(capturePick(dialog("User declined to answer questions"), false).picked, null);
+  // And it does not answer the resume question either, so the flag stays armed
+  // — clearing it here stored the RE-ASKED continue-or-fresh answer instead.
+  assert.equal(capturePick(dialog("User declined to answer questions"), true).resumeAnswered, false);
+});
+
+test("the envelope sentence is stripped down to the answer", () => {
+  assert.equal(
+    capturePick(envelope("How do you feel about Python?", "tried a little"), false).picked,
+    "tried a little",
+  );
+});
+
+test("an answer containing its own quotation marks survives the envelope", () => {
+  assert.equal(
+    capturePick(envelope("What did they call it?", 'the "geometry of position"'), false).picked,
+    'the "geometry of position"',
+  );
+});
+
+test(
+  "a mechanics dialog the tutor improvised does not become the student's prediction",
+  { todo: "pi-pair-notebook#6 — only the resume dialog is filtered" },
+  () => {
+    // maleynet, m01, 2026-08-25. The notebook had not opened; they typed "can
+    // we restart? i did not see the browser open", the tutor improvised a
+    // picker, and its answer was filed in cp1_bridges' student_picked beside
+    // their actual guess:
+    //
+    //   "student_picked": ["Yes, but only from the right starting point",
+    //                      "Found it — I can see the city now"]
+    //
+    // Nothing about this dialog is a lesson answer. It matches none of the
+    // resume words, so nothing stops it.
+    assert.equal(capturePick(dialog("Found it — I can see the city now"), false).picked, null);
+  },
+);

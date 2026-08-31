@@ -461,6 +461,109 @@ export const isDialogSentinel = (s: string): boolean =>
   /^\(no input\)$/i.test(s.trim());
 
 // ---------------------------------------------------------------------------
+// Picker answers
+// ---------------------------------------------------------------------------
+
+/**
+ * The resume dialog, recognised by the words the resume brief tells the model
+ * to use. Matching by CONTENT and not by "whatever dialog comes first after a
+ * resume" is deliberate: if the tutor asks continue-or-fresh in plain text,
+ * a positional flag would swallow the next real prediction instead.
+ *
+ * It is also the ONLY dialog anything filters, which is the hole — a dialog
+ * the tutor improvises for its own purposes ("did the page open?") matches
+ * none of these words and rides into the next checkpoint's `student_picked`.
+ * See pi-pair-notebook#6.
+ */
+const RESUME_ANSWER = /continue|fresh|left off|pick (things )?up/i;
+
+export interface PickCapture {
+  /** The answer to store on the next checkpoint, or null to store nothing. */
+  picked: string | null;
+  /** True when this was the resume choice, so the caller clears its flag. */
+  resumeAnswered: boolean;
+}
+
+const NOTHING: PickCapture = { picked: null, resumeAnswered: false };
+
+/**
+ * What a finished `ask_user_question` contributes to the graded record.
+ *
+ * Pure so a test can reach it: every branch below is a shape a live session
+ * produced, and none of them is on a boot path.
+ */
+export function capturePick(event: any, awaitingResumeChoice: boolean): PickCapture {
+  if (!/ask.?user.?question/i.test(String(event?.toolName ?? ""))) return NOTHING;
+
+  // The package supplies the answers structured on the tool result; the
+  // envelope sentence is only a fallback. Parsing prose truncated an answer
+  // that contained its own quotation marks.
+  const structured = (event?.details?.answers ?? [])
+    .map((a: any) => String(a?.answer ?? a?.value ?? "").trim())
+    .filter((v: string) => v && !isDialogSentinel(v));
+  const text = (event?.content ?? [])
+    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+    .map((c: any) => c.text)
+    .join("\n")
+    .trim();
+
+  if (structured.length) {
+    const fromDetails = structured.join(" · ");
+    if (awaitingResumeChoice && RESUME_ANSWER.test(fromDetails)) {
+      return { picked: null, resumeAnswered: true };
+    }
+    return { picked: fromDetails.slice(0, 300), resumeAnswered: false };
+  }
+  if (!text) return NOTHING;
+
+  let picked = text;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.cancelled) return NOTHING;
+    const answers = parsed?.answers ?? parsed;
+    const flat = Array.isArray(answers)
+      ? answers
+      : answers && typeof answers === "object"
+        ? Object.values(answers)
+        : [];
+    picked = flat
+      .map((a: any) => (typeof a === "string" ? a : (a?.answer ?? a?.value ?? "")))
+      .filter((v: string) => v && !isDialogSentinel(v))
+      .join(" · ");
+  } catch {
+    // Not JSON. The dialog package hands back a sentence of plumbing —
+    //   User has answered your questions: "How do you feel about
+    //   Python?"="tried a little". You can now continue …
+    // — and storing that whole sentence put a machine's voice inside the
+    // student's own `*You chose:*` line in the submitted notebook. Keep only
+    // the answers: every "question"="answer" pair's right-hand side. Per
+    // ANSWER, not per sentence: a dialog with two questions where one was
+    // left blank must still record the one that was answered. The value is
+    // matched lazily up to the quote that ends the pair, so an answer
+    // containing its own quotation marks survives instead of being stored
+    // truncated to its first word.
+    const pairs = [...text.matchAll(/"([^"]*)"\s*=\s*"([\s\S]*?)"(?=\s*[.,]|\s*$)/g)]
+      .map((m) => m[2].trim())
+      .filter((v) => v && !isDialogSentinel(v));
+    picked = pairs.length ? pairs.join(" · ") : "";
+  }
+
+  // A dismissed dialog is not an answer. The package returns a fixed "User
+  // declined to answer questions", which is a machine's sentence — stored, it
+  // printed in the submitted record as *You chose: "User declined to answer
+  // questions"*, attributed to the student.
+  //
+  // And it does NOT answer the resume question, so the flag stays armed:
+  // clearing it here meant the RE-ASKED continue-or-fresh answer was stored
+  // instead, which is the same leak one dialog later.
+  if (!picked || isDialogSentinel(picked)) return NOTHING;
+  if (awaitingResumeChoice && RESUME_ANSWER.test(picked)) {
+    return { picked: null, resumeAnswered: true };
+  }
+  return { picked: picked.slice(0, 300), resumeAnswered: false };
+}
+
+// ---------------------------------------------------------------------------
 // Detours
 // ---------------------------------------------------------------------------
 
