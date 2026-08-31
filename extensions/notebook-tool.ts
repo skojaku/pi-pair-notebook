@@ -61,6 +61,7 @@ import {
   scriptedQuestionCount,
   snapCheckpointId as snapIdAgainst,
   souvenirVerdict,
+  STUCK_ANSWERS,
   stripUnbackedAskedLines,
   verbatimFill,
   truncatedQuote,
@@ -2114,6 +2115,41 @@ function allStudentMessages(ctx: any): string[] {
 }
 
 /**
+ * Mark every message the tutor answered by giving out the notebook's address.
+ *
+ * The second of `mechanicsAsked`'s two facts. "Where is my notebook?" does not
+ * announce itself in the student's wording — xi-io wrote four sentences about
+ * `.py` files — but the tutor's ANSWER does, because the address is a string
+ * this process owns. If the reply to a message carried it, that exchange was
+ * about finding the notebook, whatever either of them typed.
+ *
+ * Only the first thing said back, and never past their next message: a URL
+ * mentioned three turns later is a different exchange.
+ */
+function markUrlAnsweredTurns(ctx: any): void {
+  try {
+    if (!/^https?:\/\/\S+$/.test(process.env.MARIMO_URL ?? "")) return;
+    const host = marimoBase();
+    const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+    for (const t of allStudentTurns(ctx)) {
+      for (let i = t.at + 1; i < entries.length; i++) {
+        const e = entries[i];
+        if (e?.type !== "message") continue;
+        const role = e?.message?.role;
+        if (role === "user") break; // their next message: this reply is over
+        if (role !== "assistant") continue;
+        const text = partsText(e.message.content);
+        if (!text) continue; // a tool-only turn is not the answer yet
+        if (text.includes(host)) mechanicsAsked.add(normMsg(t.text));
+        break;
+      }
+    }
+  } catch {
+    // A transcript we cannot read narrows nothing, like every other reader here.
+  }
+}
+
+/**
  * The question the tutor asked and never got an answer to, or "".
  *
  * `checkpoint_done` opens a dialog, and a dialog takes over the keyboard: a
@@ -2534,6 +2570,35 @@ const detourAsked = new Set<string>();
  * Cleared with detourAsked, when the checkpoint closes.
  */
 const detourSpans: [number, number][] = [];
+
+/**
+ * Messages that were about the SESSION and not about the lesson.
+ *
+ * `detourAsked` in the other currency: normalised text, dropped from the note
+ * cell wherever it sits in the window, and cleared when the checkpoint closes.
+ *
+ * A live run left two of these in cp1_bridges' note under "My guess, and how
+ * far I got" — the student asking which file the notebook was and saying the
+ * browser had not opened, printed as their work on the seven bridges. Every
+ * existing narrowing kept them: they are sentences, so not filler; nothing
+ * called log_detour, so no span; they came after the tutor spoke, so the
+ * pre-question cut does not reach them.
+ *
+ * FILLED FROM FACTS ONLY. Two of them, and both are things this process did
+ * rather than things it thinks the student meant:
+ *
+ *   1. the message that made the toolkit run `nb_notebook_url`;
+ *   2. a message whose reply carried the notebook's own address — the tutor
+ *      answering "where is it?" with the URL, which is a string this process
+ *      owns and can test for exactly.
+ *
+ * A word list over the student's own words is what this must never become:
+ * ACK_WORDS has twice deleted real answers from a graded artifact, and the
+ * rule there — the boundary decides what to drop, content may only rescue —
+ * holds here too. `student_said_verbatim` is untouched either way; every word
+ * they typed stays on the row, which is where #4 was found.
+ */
+const mechanicsAsked = new Set<string>();
 
 /**
  * Injections that end one chapter's conversation and begin the next. Both are
@@ -3306,8 +3371,14 @@ export default function (pi: ExtensionAPI) {
   const resumeGaps = new Set<string>();
   // How many turns the tutor has spent on the checkpoint it is working now.
   // Reset by checkpoint_done and chapter_done — see the ⚖️ nudge at turn_end.
+  // A FACT for the row, and nothing else. It gates nothing — see the ⚖️ nudge
+  // in turn_end for why counting turns was the wrong measure for "stuck".
   let turnsInCheckpoint = 0;
-  const STUCK_TURNS = 12;
+  // The ⚖️ nudge fires once per checkpoint. It used to be an `=== 12` on a
+  // monotonically rising turn count, which is self-limiting; an answer count
+  // can sit on the same number for several turns, so the once-ness has to be
+  // stated rather than implied.
+  let stuckNudged = false;
   // Upload widgets nb_view_image has actually looked at. Cell presence is
   // not evidence that the photo was ASKED for: cp5's script builds the drop
   // area up front, so the area exists from question 1 and a tutor that then
@@ -4458,12 +4529,17 @@ export default function (pi: ExtensionAPI) {
       // it: which messages the note quotes, the boundary-drops-content-rescues
       // asymmetry, and the fail-open cascade that gives both narrowings up
       // rather than let the note fall through to the MODEL's wording.
+      // The "where is my notebook?" exchange, from the two facts in
+      // mechanicsAsked's note. Run here rather than at each turn because this
+      // is where the note is built and the whole branch is in hand.
+      markUrlAnsweredTurns(ctx);
       const chosen = chooseQuotedWithFallback({
         said,
         response,
         cut: preAsk,
         detourSpans,
         detourAsked,
+        mechanicsAsked,
         dropDetours: true,
       });
       const noteCut = chosen.cutUsed;
@@ -4831,15 +4907,20 @@ export default function (pi: ExtensionAPI) {
       // row kept a single line and lost the hint it was given. Nothing in the
       // record said any of this happened.
       //
-      // The turn count is the tell. A checkpoint answered when it is asked
-      // closes in a handful of turns; the ⚖️ nudge already treats STUCK_TURNS
-      // as "these two are going round". Zero hints after that many turns is
-      // not a clean pass, whatever the model believes it remembers. Refuse
-      // once — the model gets to recount, and to close the next one on time —
-      // then log whatever comes back, because a guard that will not let go is
-      // a student stuck at a checkpoint they have already finished.
-      // The same zero, caught earlier. The turn count above only fires after
-      // twelve turns, and a checkpoint can be guided through in five: two live
+      // How many times they ANSWERED is the tell. A checkpoint answered when
+      // it is asked takes one or two; six is the same "these two are going
+      // round" the ⚖️ nudge fires on, and zero hints after six answers is not
+      // a clean pass whatever the model believes it remembers. Refuse once —
+      // the model gets to recount, and to close the next one on time — then
+      // log whatever comes back, because a guard that will not let go is a
+      // student stuck at a checkpoint they have already finished.
+      //
+      // This arm was `turnsInCheckpoint >= 12` and it was measuring the wrong
+      // thing: a live session ran 13 assistant turns to 5 student messages, so
+      // twelve turns is four or five exchanges, and this could refuse a close
+      // on a checkpoint the student had answered twice. See #3.
+      // The same zero, caught earlier. The count above only fires at six
+      // answers, and a checkpoint can be guided through in three: two live
       // runs logged `pass` with no hints on rows whose own verbatim array
       // holds the wrong first answer that a hint corrected, and one of them
       // wrote "invented it unprompted" in the notes beside it.
@@ -4864,11 +4945,17 @@ export default function (pi: ExtensionAPI) {
       // The count comes from the SAME narrowing the note cell uses, so the two
       // can never disagree again about what an answer is here. Subtracting can
       // only turn the gate off, never on.
-      const answerCount = answerCountForGate({ said, response, detourSpans, detourAsked });
+      const answerCount = answerCountForGate({
+        said,
+        response,
+        detourSpans,
+        detourAsked,
+        mechanicsAsked,
+      });
       const moreAnswersThanQuestions = qCount > 0 && answerCount > qCount;
       const lateStrikes = lateCloseWarned.get(id) ?? 0;
       if (
-        (turnsInCheckpoint >= STUCK_TURNS || moreAnswersThanQuestions) &&
+        (answerCount >= STUCK_ANSWERS || moreAnswersThanQuestions) &&
         Math.round(Number(params.hints_used ?? 0) || 0) === 0 &&
         judgment !== "prediction" &&
         lateStrikes < 1 &&
@@ -4881,7 +4968,7 @@ export default function (pi: ExtensionAPI) {
             (moreAnswersThanQuestions
               ? `this checkpoint's script asks ${qCount} question${qCount === 1 ? "" : "s"} ` +
                 `and the student sent ${answerCount} answers, `
-              : `this checkpoint has been open for ${turnsInCheckpoint} turns `) +
+              : `the student has answered ${answerCount} times at this checkpoint `) +
             `and you are logging it with no hints. Two things to fix, in this order.\n` +
             `1. hints_used: count the smaller questions you asked to get them there. ` +
             `A question you asked because an answer was not there yet is a hint, even ` +
@@ -4926,6 +5013,10 @@ export default function (pi: ExtensionAPI) {
       // The detour marks belong to the checkpoint just closed — the same
       // words typed again later are a fresh answer.
       detourAsked.clear();
+      // Same lifetime, same reason: the same words typed again at the NEXT
+      // checkpoint are a fresh answer, not a fresh piece of housekeeping.
+      mechanicsAsked.clear();
+      stuckNudged = false;
       // The spans are indices into the window that just closed. Left behind,
       // they would point at whatever the NEXT checkpoint's window puts in
       // those slots — the student's own answers.
@@ -6410,6 +6501,8 @@ export default function (pi: ExtensionAPI) {
           // and it is the same bug shape as the three that shipped: a read of
           // mutable state across a boundary, on a path no boot test reaches.
           detourAsked.clear();
+          mechanicsAsked.clear();
+          stuckNudged = false;
           detourSpans.length = 0;
           // A fresh start is turn one of a new session. Carrying the abandoned
           // run's count forward can trip the no-hints late-close gate on the
@@ -6816,6 +6909,16 @@ export default function (pi: ExtensionAPI) {
         });
       }
       const url = `${r.url}/?view-as=present`;
+      // Whatever they typed to get here was about finding the notebook, not
+      // about the lesson — so it must not end up quoted in the next
+      // checkpoint's note as their worked answer. The FIRST of mechanicsAsked's
+      // two facts: this tool ran, and this is the message that made it run.
+      try {
+        const said = studentSaidSince(lastCtx, false);
+        if (said.length) mechanicsAsked.add(normMsg(said[said.length - 1]));
+      } catch {
+        /* narrowing the note is never worth a failed tool call */
+      }
       // Puts the page back if the tab was closed — rate-limited inside.
       reopenPage();
       return toResult({
@@ -6854,17 +6957,12 @@ export default function (pi: ExtensionAPI) {
       // is the one that was standing. See kernelGuard.
       const refused = kernelGuard(params.code);
       if (refused) return toResult({ out: refused, failed: false });
-      const result = await runKernel(params.code, signal);
-      // Hand-written log JSON is obsolete and drifts (schema, timestamps,
-      // paraphrased answers) — redirect to the tool that owns the record.
-      if (/session_log|session_summary/.test(params.code)) {
-        result.out =
-          (result.out ? result.out + "\n" : "") +
-          `NOTE: do NOT write the session log or summary by hand — checkpoint_done ` +
-          `logs checkpoints (and adds the note cell and the transition ask), ` +
-          `log_detour logs questions, and chapter_done writes the closing summary.`;
-      }
-      return toResult(result);
+      // The graded-record check used to live BELOW this line: the code ran,
+      // the row was written, and the tutor was then told not to write rows by
+      // hand. 66 of the 87 nb_run calls in this machine's history were exactly
+      // that. It is part of kernelGuard now, so it refuses instead of
+      // complaining afterwards.
+      return toResult(await runKernel(params.code, signal));
     },
     ...quiet("One moment…"),
   });
@@ -7049,13 +7147,50 @@ export default function (pi: ExtensionAPI) {
     // accordion at the bottom of a long page. A beginner going round the
     // same question for the fifth time does not know it is there.
     //
-    // "Going round" is countable without asking the model to notice: turns
-    // spent inside one checkpoint. A checkpoint normally takes a handful; a
-    // dozen means the two of them are stuck, whatever the tutor believes.
-    // Said once per checkpoint, as an instruction to mention it in passing —
-    // not as an accusation, and not as a reason to stop teaching.
+    // "Going round" is countable without asking the model to notice — but NOT
+    // as turns, which is what this counted for as long as it existed.
+    //
+    // A turn is not an exchange. Measured on a live m01 session: 13 assistant
+    // turns to 5 student messages, four of those turns with no words in them
+    // at all. A tool call is a turn; a refused checkpoint_done and its retry
+    // are two more; every guard that fires adds one, and guards have been
+    // added since twelve was chosen. So `STUCK_TURNS = 12` was reached after
+    // four or five real exchanges, and an m02 review reported this nudge
+    // landing "right after the very first wrong turn on cp2_distance". That
+    // is pi-pair-notebook#3: the counter resets correctly (cp0 logged 1 and
+    // cp1 logged 8 in the same run) — it was counting the wrong thing.
+    //
+    // Six ANSWERS now, through the same narrowing the note cell and the
+    // late-close gate use, so all three agree on what an answer is. Filler and
+    // a detour's turns are already out of it: a student who asks two questions
+    // mid-checkpoint is curious, not stuck.
+    //
+    // `turnsInCheckpoint` stays, and gates nothing. It is the FACT on the row
+    // — "how long the two of them were actually on this checkpoint" — beside a
+    // hint count the model supplies from memory. Keeping the record and the
+    // trigger as separate numbers is the point: each now measures the thing it
+    // is named after.
     turnsInCheckpoint += 1;
-    if (turnsInCheckpoint === STUCK_TURNS) {
+    const stuckAnswers = (() => {
+      try {
+        return answerCountForGate({
+          said: studentSaidSince(lastCtx, false),
+          response: "",
+          detourSpans,
+          detourAsked,
+          mechanicsAsked,
+        });
+      } catch {
+        return 0;
+      }
+    })();
+    // `>=`, not `===`. The old equality was safe only because a turn counter
+    // rises by exactly one; an answer count can jump two in a turn (a student
+    // who types twice while the tutor is working) and an equality would then
+    // skip the nudge for the whole checkpoint. `stuckNudged` carries the
+    // once-ness now, so the comparison does not have to.
+    if (stuckAnswers >= STUCK_ANSWERS && !stuckNudged) {
+      stuckNudged = true;
       try {
         pi.sendMessage(
           {

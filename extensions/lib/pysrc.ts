@@ -206,6 +206,22 @@ const BANNED_CALLS = [
 
 const BANNED_DUNDERS = ["__subclasses__", "__globals__", "__builtins__", "__loader__", "__code__"];
 
+/**
+ * The graded record, which no model-authored Python may touch.
+ *
+ * `nb_run` used to RUN the code and append a note afterwards — "do NOT write
+ * the session log or summary by hand" arrived after the write had already
+ * happened. It is the single most-used thing anyone has ever done with this
+ * tool: 66 of the 87 nb_run calls on this machine were hand-written log JSON,
+ * all of them in the prototype before `checkpoint_done` existed, and the tool
+ * has been one refusal away from letting it happen again ever since.
+ *
+ * Hand-written rows drift — schema, timestamps, and the student's answer
+ * paraphrased into a field that is supposed to be verbatim. checkpoint_done,
+ * log_detour and chapter_done own these files.
+ */
+const GRADED_ARTIFACTS = /\bsession_log\b|\bsession_summary\b|\bchapter_state\b/;
+
 export interface KernelScan {
   ok: boolean;
   /** What was found, in the words the refusal prints. */
@@ -295,6 +311,9 @@ export function scanKernelCode(src: string): KernelScan {
     if (new RegExp(`\\b${c}\\s*\\(`).test(code)) add(`${c}()`);
   }
   for (const d of BANNED_DUNDERS) if (code.includes(d)) add(d);
+  // On the ORIGINAL text, not the skeleton: a filename lives in a string
+  // literal, and the skeleton is exactly the thing that removes those.
+  if (GRADED_ARTIFACTS.test(String(src ?? ""))) add("the graded record");
   return { ok: hits.length === 0, hits };
 }
 
@@ -305,6 +324,18 @@ export function scanKernelCode(src: string): KernelScan {
  * wanted was the notebook's address.
  */
 export function kernelRefusal(hits: string[]): string {
+  if (hits.length === 1 && hits[0] === "the graded record") {
+    return (
+      `NOT RUN — this code touches the session log, the summary or the chapter state, and ` +
+      `those are not written by hand. A hand-written row drifts: the schema, the ` +
+      `timestamps, and the student's answer paraphrased into a field that is supposed to ` +
+      `be their words.\n` +
+      `checkpoint_done logs a checkpoint (and adds the note cell and the transition ask), ` +
+      `log_detour logs a question they asked, and chapter_done writes the closing summary. ` +
+      `Use those. If what you wanted was to READ the record, you do not need to — the ` +
+      `closing summary is built for you.`
+    );
+  }
   return (
     `NOT RUN — this code reaches the operating system (${hits.join(", ")}), and the ` +
     `notebook kernel is not a shell. You do not have one, deliberately.\n` +

@@ -255,3 +255,36 @@ test("the from-import forms this course really uses still run", () => {
     assert.equal(r.ok, true, `${code.split("\n")[0]} → ${r.hits.join(", ")}`);
   }
 });
+
+test("the graded record is refused, not written and then complained about", () => {
+  // 66 of the 87 nb_run calls in this machine's history were hand-written log
+  // JSON. The old check ran the code first and appended a note afterwards, so
+  // the row was already on disk by the time the tutor was told not to.
+  for (const code of [
+    `import json\nwith open("session_artifacts/session_log.jsonl","a") as f:\n    f.write(json.dumps(row))`,
+    `open("session_artifacts/session_summary.md","w").write(summary)`,
+    `import json; json.dump(state, open("session_artifacts/chapter_state.json","w"))`,
+  ]) {
+    const r = scanKernelCode(code);
+    assert.equal(r.ok, false, code.split("\n")[0]);
+    assert.ok(r.hits.includes("the graded record"));
+  }
+});
+
+test("the graded-record refusal names the tools that own those files", () => {
+  const r = kernelRefusal(["the graded record"]);
+  assert.match(r, /checkpoint_done/);
+  assert.match(r, /log_detour/);
+  assert.match(r, /chapter_done/);
+  // It is a different fault from reaching the operating system, and must not
+  // read as one.
+  assert.ok(!/operating system/.test(r));
+});
+
+test("saving a photo beside the log is still fine", () => {
+  // The check is on the graded files by name, not on session_artifacts/.
+  const r = scanKernelCode(
+    'import base64, pathlib\npathlib.Path("session_artifacts/uploads/p.jpg").write_bytes(base64.b64decode(b))',
+  );
+  assert.equal(r.ok, true, r.hits.join(", "));
+});

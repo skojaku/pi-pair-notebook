@@ -204,6 +204,21 @@ export interface QuoteWindow {
   detourSpans: [number, number][];
   /** Normalised text of questions already recorded as detours. */
   detourAsked: Set<string>;
+  /**
+   * Normalised text of messages that were about the SESSION, not the lesson —
+   * "which notebook do you mean?", "i did not see the browser open".
+   *
+   * A live run put two of those into cp1_bridges' note cell under "My guess,
+   * and how far I got", between the student's prediction and their real
+   * answer. They are not filler (they are sentences), not a detour (nothing
+   * called log_detour), and not pre-question (they came after the tutor
+   * spoke), so every existing narrowing kept them.
+   *
+   * Filled from FACTS, never from a word list over the student's words: the
+   * message that made the toolkit run nb_notebook_url, and any message whose
+   * reply carried the notebook's address. See pi-pair-notebook#12.
+   */
+  mechanicsAsked?: Set<string>;
   dropDetours: boolean;
 }
 
@@ -230,7 +245,11 @@ export function chooseQuoted(w: QuoteWindow): { keep: string[]; from: number[] }
     const inDetour = w.dropDetours && w.detourSpans.some(([a, b]) => i >= a && i <= b);
     const elsewhere = (i < w.cut || inDetour) && !isResponse && !slotTokens(m).some(isFigure);
     const k =
-      isResponse || (!elsewhere && !w.detourAsked.has(normMsg(m)) && !isFillerMessage(m));
+      isResponse ||
+      (!elsewhere &&
+        !w.detourAsked.has(normMsg(m)) &&
+        !w.mechanicsAsked?.has(normMsg(m)) &&
+        !isFillerMessage(m));
     if (k) from.push(i + 1);
     return k;
   });
@@ -257,6 +276,15 @@ export function chooseQuotedWithFallback(
   }
   if (w.detourSpans.length) {
     chosen = chooseQuoted({ ...w, dropDetours: false });
+    if (chosen.keep.length) return { ...chosen, cutUsed: w.cut, detoursDropped: false };
+  }
+  // And the newest narrowing gives way last. mechanicsAsked is the most
+  // precise of the three — it is filled from two facts rather than from a
+  // guess about wording — so it is the one to hold on to longest; but "the
+  // note falls through to the MODEL's wording" is worse than any of them, so
+  // it gives way too rather than let that happen.
+  if (w.mechanicsAsked?.size) {
+    chosen = chooseQuoted({ ...w, mechanicsAsked: undefined, dropDetours: false });
     if (chosen.keep.length) return { ...chosen, cutUsed: w.cut, detoursDropped: false };
   }
   return { ...chosen, cutUsed: w.cut, detoursDropped: false };
@@ -289,9 +317,28 @@ export function answerCountForGate(w: {
   response: string;
   detourSpans: [number, number][];
   detourAsked: Set<string>;
+  mechanicsAsked?: Set<string>;
 }): number {
   return chooseQuoted({ ...w, cut: 0, dropDetours: true }).keep.length;
 }
+
+/**
+ * How many answers make "these two are going round".
+ *
+ * It used to be twelve TURNS, and a turn is not an exchange. Measured on a live
+ * m01 session: 13 assistant turns to 5 student messages, four of those turns
+ * with no words in them at all — a tool call is a turn, a refused
+ * `checkpoint_done` and its retry are two more, and every guard that fires adds
+ * one. So `STUCK_TURNS = 12` was reached after four or five real exchanges, and
+ * an m02 review reported the ⚖️ nudge landing "right after the very first wrong
+ * turn". That is pi-pair-notebook#3, and the count was the story.
+ *
+ * Six ANSWERS. A checkpoint normally takes one to three; six means the student
+ * has said six things here and is still on it, whatever the model believes.
+ * Filler and a detour's turns are already out — the same narrowing the note
+ * cell and the late-close gate use, so all three agree on what an answer is.
+ */
+export const STUCK_ANSWERS = 6;
 
 /**
  * A model-filled slot describes a picture, so its prose is the tutor's.

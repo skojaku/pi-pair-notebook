@@ -29,6 +29,7 @@ import {
   repairQuotes,
   rewriteRivalServer,
   souvenirVerdict,
+  STUCK_ANSWERS,
   stripUnbackedAskedLines,
   scriptedQuestionCount,
   slotDrift,
@@ -937,4 +938,99 @@ test("the same line, when they really said it, is left alone", () => {
   const code =
     'mo.md(r"""### Detour: trail vs circuit\n\nYou asked: *"whats the difference between a trail and a circuit? i keep mixing them up"*\n\n- A **trail** is a walk…""")';
   assert.deepEqual(stripUnbackedAskedLines(code, said), { code, removed: [] });
+});
+
+// ---------------------------------------------------------------------------
+// mechanicsAsked — "where is my notebook" is not an answer (#12)
+// ---------------------------------------------------------------------------
+
+test("a where-is-my-notebook exchange is kept out of the note cell", () => {
+  // Live Part D run, cp1_bridges. All three messages were typed after the
+  // tutor spoke, none is filler, and nothing called log_detour — so every
+  // existing narrowing kept them, and the keepsake read:
+  //   "My guess, and how far I got: no, it's impossible — "Which notebook you
+  //    mean? …" · "this terminal is you though …" · "ok i can see it now …"
+  const said = [
+    "Which notebook you mean? Is it m01lab notebook or some other notebook? I don't really know which notebook you mean.",
+    "this terminal is you though. and i did not see the browser open. nothing happened when i clicked it",
+    "ok i can see it now. i tried starting from the north bank and went A B C D but then i was stuck with two bridges left and no way back",
+  ];
+  const mechanicsAsked = new Set([normMsg(said[0]), normMsg(said[1])]);
+  const r = chooseQuoted({
+    said,
+    response: "tried from the north bank, A B C D, stuck with two bridges left",
+    cut: 0,
+    ...NO_DETOURS,
+    mechanicsAsked,
+    dropDetours: true,
+  });
+  assert.deepEqual(r.keep, [said[2]], "only their actual answer belongs in the note");
+});
+
+test("their real answer comes back even if it was marked", () => {
+  // The rescue that makes this safe: content may only ever RESCUE. If the
+  // tutor logged a marked message as the answer, it is the answer.
+  const said = ["i did not see the browser open"];
+  const r = chooseQuoted({
+    said,
+    response: "i did not see the browser open",
+    cut: 0,
+    ...NO_DETOURS,
+    mechanicsAsked: new Set([normMsg(said[0])]),
+    dropDetours: true,
+  });
+  assert.deepEqual(r.keep, said);
+});
+
+test("marking every message leaves the note its fallback, not nothing", () => {
+  // The cascade must still hand the window back rather than let the note fall
+  // through to the MODEL's wording — the thing every check here exists to stop.
+  const said = ["where is the notebook", "i still cannot see it"];
+  const r = chooseQuotedWithFallback({
+    said,
+    response: "(nothing they typed)",
+    cut: 0,
+    ...NO_DETOURS,
+    mechanicsAsked: new Set(said.map(normMsg)),
+    dropDetours: true,
+  });
+  assert.deepEqual(r.keep, said);
+});
+
+test("an unmarked session behaves exactly as before", () => {
+  // mechanicsAsked is optional, and absent it must change nothing.
+  const said = ["2", "and the average is 7/6"];
+  const w = { said, response: "7/6", cut: 0, ...NO_DETOURS, dropDetours: true };
+  assert.deepEqual(chooseQuoted(w).keep, chooseQuoted({ ...w, mechanicsAsked: new Set() }).keep);
+});
+
+// ---------------------------------------------------------------------------
+// STUCK_ANSWERS — counting exchanges, not turns (#3)
+// ---------------------------------------------------------------------------
+
+test("a checkpoint answered in a couple of tries is not stuck", () => {
+  // The measured ratio is 2.6 assistant turns per student message, so twelve
+  // turns was four or five exchanges — and an m02 review saw the ⚖️ nudge land
+  // "right after the very first wrong turn".
+  const said = ["is it 3?", "oh wait, 5"];
+  assert.ok(
+    answerCountForGate({ said, response: "5", ...NO_DETOURS }) < STUCK_ANSWERS,
+    "two answers must not read as stuck",
+  );
+});
+
+test("six answers at one checkpoint is stuck", () => {
+  const said = ["3", "4", "maybe 5", "im not sure", "6?", "7"];
+  assert.ok(answerCountForGate({ said, response: "7", ...NO_DETOURS }) >= STUCK_ANSWERS);
+});
+
+test("a curious student is not a stuck one", () => {
+  // Two asides mid-checkpoint used to push the count toward the threshold in
+  // both currencies. The detour's turns are out of it now.
+  const said = ["is it 3?", "whats a multigraph?", "ah ok", "and a trail?", "got it", "its 5"];
+  const detourSpans: [number, number][] = [[1, 2], [3, 4]];
+  assert.ok(
+    answerCountForGate({ said, response: "its 5", detourSpans, detourAsked: new Set() }) <
+      STUCK_ANSWERS,
+  );
 });
