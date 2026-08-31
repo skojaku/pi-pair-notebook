@@ -275,7 +275,14 @@ ENVS=(--env "TUTOR_VISION_MODEL=${TUTOR_VISION_MODEL:-netsci/vision}"
       --env "TUTOR_REFEREE_MODEL=${TUTOR_REFEREE_MODEL:-netsci/referee}")
 [ -n "$MARIMO_URL" ] && ENVS+=(--env "MARIMO_URL=$MARIMO_URL")
 
-herdr agent start "$AGENT" --cwd "$SANDBOX" --no-focus \
+# Where the pane lands. Left to herdr it goes wherever herdr's default is,
+# which on a reviewer's machine is whatever workspace they were not looking at
+# — a live session running unwatched in another window is the one thing a gate
+# run must not be. E2E_HERDR_WORKSPACE puts it beside the work it is testing.
+PANE_ARGS=(--cwd "$SANDBOX" --no-focus)
+[ -n "${E2E_HERDR_WORKSPACE:-}" ] && PANE_ARGS+=(--workspace "$E2E_HERDR_WORKSPACE")
+
+herdr agent start "$AGENT" "${PANE_ARGS[@]}" \
   "${ENVS[@]}" \
   -- pi --model "$TUTOR_MODEL" --thinking low -a \
      --no-skills --no-prompt-templates \
