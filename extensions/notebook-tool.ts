@@ -2614,15 +2614,6 @@ const detourSpans: [number, number][] = [];
  */
 const mechanicsAsked = new Set<string>();
 
-/**
- * Injections that end one chapter's conversation and begin the next. Both are
- * written by this file (chapterScriptMessage, and the divider beside it), so
- * this holds for m01, m02 and anything authored later. customType FIRST and
- * the text prefix second: the prefix test in INJECTED_PREFIX is the one that
- * has already failed once, when something between sendMessage and getBranch
- * re-wrapped a message and lost it.
- */
-const CHAPTER_BOUNDARY_TYPES = new Set(["chapter-script", "chapter-divider"]);
 
 
 async function notebookCellNames(signal?: AbortSignal): Promise<string[] | null> {
@@ -3672,8 +3663,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Chapter dividers render as a single accent line in the transcript.
-  pi.registerMessageRenderer("chapter-divider", (message: any, _opts: any, theme: any) => {
-    return new Text(theme.fg("accent", String(message.content ?? "")), 0, 0);
+  //
+  // An ENTRY, not a message, and that is the whole point: "Custom entries do
+  // not participate in LLM context", and — measured — they do not start a turn
+  // either. As a `followUp` message this line cost a turn of its own, and the
+  // student read the tutor filling the silence:
+  //     ── Chapter 2 · Abstraction ──
+  //     Ready when you are — the next chapter's script will come through…
+  // The divider is for the student's eyes and for nothing else, so it should
+  // never have been in the model's conversation to begin with.
+  pi.registerEntryRenderer?.("chapter-divider", (entry: any, _opts: any, theme: any) => {
+    return new Text(theme.fg("accent", String(entry?.data ?? "")), 0, 0);
   });
 
   // ── Only the CURRENT chapter's script reaches the model ─────────────────
@@ -3966,22 +3966,33 @@ export default function (pi: ExtensionAPI) {
       // "── Chapter 2 ──" — a chapter-1 answer filed inside chapter 2, in the
       // keepsake the student submits.
       void flushParkedNotes().then(() => insertChapterHeader(next, num, chapters.length));
-      pi.sendMessage(
-        { customType: "chapter-handoff", content: brief, display: false },
-        { deliverAs: "followUp" },
-      );
-      pi.sendMessage(
-        {
-          customType: "chapter-divider",
-          content: `── Chapter ${num} · ${next.title} ──`,
-          display: true,
-        },
-        { deliverAs: "followUp" },
-      );
+      // ── How these are delivered, learned twice from live runs ────────────
+      // A `followUp` STARTS A TURN. Sending the brief, the divider and the
+      // script as three followUps gave the student two lines of the tutor
+      // talking to itself while the handoff assembled:
+      //     I'm ready for the next chapter whenever it loads.
+      //     ── Chapter 2 · Abstraction ──
+      //     Ready when the chapter script arrives.
+      // So the obvious fix was `nextTurn` for the first two — and that was
+      // worse in a way only the transcript showed: parked messages are NOT
+      // delivered into the turn a followUp triggers. The brief and the divider
+      // simply never arrived. The tutor entered chapter 2 with no handoff
+      // notes at all and the student never saw the chapter break.
+      //
+      // The brief and the script are both invisible context for the tutor, so
+      // they are ONE message and one turn. The divider is the student's, and
+      // it stays a followUp — that costs the one filler line this had before
+      // any of this, and it is the line the divider itself explains.
+      try {
+        pi.appendEntry?.("chapter-divider", `── Chapter ${num} · ${next.title} ──`);
+      } catch {
+        // A pi without custom entries: the student loses a separator line, and
+        // the chapter still turns over.
+      }
       pi.sendMessage(
         {
           customType: "chapter-script",
-          content: chapterScriptMessage(next, num, chapters.length),
+          content: `${brief}\n\n${chapterScriptMessage(next, num, chapters.length)}`,
           display: false,
         },
         { deliverAs: "followUp", triggerTurn: true },
