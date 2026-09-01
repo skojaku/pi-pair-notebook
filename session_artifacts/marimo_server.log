@@ -1,0 +1,28 @@
+Running in a sandbox: /opt/homebrew/bin/uv run --isolated --no-project --compile-bytecode --with-requirements /var/folders/p1/kb5lqhy52sq93xp1kx4308y00000gn/T/tmp8v20hxz4.txt --refresh --python 3.12.13 marimo edit --no-token --headless notebook.py
+Installed 42 packages in 103ms
+Bytecode compiled 2318 files in 2.24s
+
+        Edit notebook.py in your browser 📝
+
+        ➜  URL: http://localhost:2721
+
+[W 260901 06:10:37 health:451] Neither nvidia-smi nor rocm-smi succeeded, cannot get GPU stats
+
+        Thanks for using marimo! 🌊🍃
+
+/Users/skojaku/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 12 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+Running in a sandbox: /opt/homebrew/bin/uv run --isolated --no-project --compile-bytecode --with-requirements /var/folders/p1/kb5lqhy52sq93xp1kx4308y00000gn/T/tmprqtzg3r6.txt --refresh --python 3.12.13 marimo edit --no-token --headless notebook.py
+
+        Edit notebook.py in your browser 📝
+
+        ➜  URL: http://localhost:2721
+
+[W 260901 06:13:13 health:451] Neither nvidia-smi nor rocm-smi succeeded, cannot get GPU stats
+Running in a sandbox: /opt/homebrew/bin/uv run --isolated --no-project --compile-bytecode --with-requirements /var/folders/p1/kb5lqhy52sq93xp1kx4308y00000gn/T/tmpye6t92rr.txt --refresh --python 3.12.13 marimo edit --no-token --headless notebook.py
+
+        Edit notebook.py in your browser 📝
+
+        ➜  URL: http://localhost:2722
+
+[W 260901 06:14:09 health:451] Neither nvidia-smi nor rocm-smi succeeded, cannot get GPU stats

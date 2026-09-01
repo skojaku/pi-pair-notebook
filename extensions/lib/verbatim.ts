@@ -336,34 +336,32 @@ export const STUCK_ANSWERS = 6;
 
 
 
+
 /**
- * Where a CHAPTER-HANDOFF compaction should cut.
+ * Only the CURRENT chapter's script belongs in the outbound payload.
  *
- * Not where pi would. pi's `findCutPoint` walks backwards keeping the most
- * recent `keepRecentTokens` of conversation, which is the right rule for a
- * compaction that happens because the context got big. This one happens
- * because a chapter ENDED, and its summary is a complete handoff brief for
- * everything before it — so everything before it should go.
+ * The tutor is handed each chapter's curriculum as a `chapter-script` message,
+ * and they accumulate: a five-chapter session ends with five of them, 12,500
+ * tokens, ~30% of the whole conversation. The finished ones are not merely
+ * waste — chapter 1's script ends by telling the tutor to call chapter_done,
+ * and chapter_done's own guard records what that produced: two transitions
+ * back to back, and a student taken from chapter 1 into chapter 3's task.
  *
- * Handing pi's cut point back meant the compaction removed almost nothing: a
- * chapter's conversation is nowhere near the budget (measured at 5,571 tokens
- * against a keepRecentTokens of 3,000), so the cut landed at or before the
- * OUTGOING chapter's own script. Replayed across all 92 real handoffs on one
- * machine, 40 of them kept the finished chapter's script alive and the model
- * began the next chapter reading a script whose closing line tells it to call
- * chapter_done. With this the number is 0, and the mean context at the
- * boundary goes from 24.1 entries to 2.
+ * This replaced a compaction at every chapter boundary. That mechanism needed
+ * eight moving parts (arming, an isIdle poll, two timers, a TTL, an error
+ * path, an ordering rule, a turn_end guard) and did not work: measured across
+ * 92 real handoffs, 40 kept the finished chapter's script anyway.
  *
- * The LAST entry on the branch, because pi keeps FROM the id inclusive: that
- * is the turn chapter_done was called in, so the tutor keeps its own bridge
- * sentence and loses the chapter behind it. An id pi cannot find degrades to
- * "keep only what came after the compaction", which is the same intent.
+ * Returns null when there is nothing to do, so the caller can leave the
+ * payload untouched — which is the safe answer and the common one.
  */
-export function handoffCutPoint(branchEntries: unknown, fallback: string): string {
-  const branch = Array.isArray(branchEntries) ? branchEntries : [];
-  const last = branch.length ? (branch[branch.length - 1] as { id?: unknown }) : null;
-  const id = typeof last?.id === "string" ? last.id : "";
-  return id || fallback;
+export function keepCurrentChapterScript<T extends { customType?: unknown }>(
+  messages: T[],
+): T[] | null {
+  const scripts = messages.filter((m) => m?.customType === "chapter-script");
+  if (scripts.length < 2) return null;
+  const current = scripts[scripts.length - 1];
+  return messages.filter((m) => m?.customType !== "chapter-script" || m === current);
 }
 
 // ---------------------------------------------------------------------------

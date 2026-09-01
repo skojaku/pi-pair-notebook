@@ -42,8 +42,8 @@ import {
   baseCheckpointId,
   capturePick,
   driftIsReportable,
-  handoffCutPoint,
   renderNoteSkeleton,
+  keepCurrentChapterScript,
   matchDetourQuestion,
   normMsg,
   notebookBanner,
@@ -1695,10 +1695,17 @@ const STATUS_PARAM = Type.Optional(
 );
 
 // ── Chapter orchestration (the deterministic "lead agent") ──────────────────
-// The lesson is split into chapters (lesson/index.json). The tutor holds only
-// the CURRENT chapter's script in context; chapter_done builds a handoff
-// brief, injects the next script, and trims the old conversation via
-// compaction — same session, same visible transcript, fresh LLM context.
+// The lesson is split into chapters (lesson/index.json). chapter_done builds a
+// handoff brief and injects it with the next chapter's script; the `context`
+// hook keeps only the CURRENT script in the outbound payload.
+//
+// This sentence used to end "and trims the old conversation via compaction —
+// same session, same visible transcript, fresh LLM context", and that was
+// measured false at 40 of 92 real handoffs. The conversation is NOT trimmed
+// any more, deliberately: a whole five-chapter session is 37,000-44,000 tokens
+// and the tutor is better for remembering it. What is trimmed is the four
+// stale scripts, which is 12,500 of those tokens and the only part that ever
+// caused a fault.
 type Chapter = {
   id: string;
   file: string;
@@ -3669,70 +3676,65 @@ export default function (pi: ExtensionAPI) {
     return new Text(theme.fg("accent", String(message.content ?? "")), 0, 0);
   });
 
-  // Custom compaction at chapter boundaries: the handoff brief IS the summary
-  // (deterministic, no extra LLM call).
-  let pendingHandoffBrief: string | null = null;
-  // When it was armed. The brief belongs to ONE compaction — the one
-  // chapter_done starts — and every other path that arms it also clears it on
-  // failure, except the 20-second fallback timer, which did not. A brief left
-  // behind there is consumed by the next compaction instead, which may be the
-  // automatic one forty minutes later: the tutor is then handed a summary
-  // saying it has just started chapter 2, in the middle of chapter 3, and the
-  // real conversation is gone. Stale after two minutes, which is far longer
-  // than the handoff takes and far shorter than the session.
-  let handoffArmedAt = 0;
-  const HANDOFF_TTL_MS = 120_000;
-  // Armed by chapter_done, fired at message_end — see the comment there.
-  let pendingCompaction: (() => void | Promise<void>) | null = null;
-  const runPendingCompaction = () => {
-    const go = pendingCompaction;
-    pendingCompaction = null;
-    if (go) void Promise.resolve(go()).catch(() => {});
-  };
-  pi.on("session_before_compact", async (event: any) => {
-    if (!pendingHandoffBrief) return;
-    if (Date.now() - handoffArmedAt > HANDOFF_TTL_MS) {
-      pendingHandoffBrief = null;
-      return; // let pi summarise this one itself
-    }
-    const summary = pendingHandoffBrief;
-    pendingHandoffBrief = null;
-    // ── Where the cut lands, and why it is not pi's ──────────────────────
-    // This used to hand `event.preparation.firstKeptEntryId` straight back —
-    // pi's own cut point, which findCutPoint walks backwards to keep the most
-    // recent `keepRecentTokens` of conversation. That is the right rule for a
-    // compaction that happens because the context got big. It is the wrong
-    // rule for this one, which happens because a CHAPTER ENDED, and whose
-    // summary is a complete handoff brief for everything before it.
-    //
-    // A chapter's conversation is nowhere near the budget — measured at 5,571
-    // tokens against a keepRecentTokens of 3,000-20,000 — so pi's cut point
-    // lands at or before the OUTGOING chapter's own script, and the compaction
-    // removes essentially nothing. Measured across 92 real handoffs on one
-    // machine: 40 kept the finished chapter's script alive, 39 then held TWO
-    // chapter scripts in context at once, and 23 of them came out of the
-    // "compaction" BIGGER than they went in. The design note above this
-    // handler — "same session, same visible transcript, fresh LLM context" —
-    // was false at every one of them, and the tutor began chapter 2 still
-    // reading chapter 1's script, whose closing line tells it to call
-    // chapter_done. chapter_done's own guard records what that produced: two
-    // transitions back to back, and a student who went from chapter 1 straight
-    // into chapter 3's pen-and-paper task.
-    //
-    // pi stores whatever id the hook returns, unvalidated (session-manager
-    // appendCompaction), and buildContextEntries keeps from it — so the hook
-    // is allowed to name its own boundary, and this one should: the last entry
-    // on the branch, which is the chapter_done turn. Everything before it is
-    // what the brief already says. An id pi cannot find degrades to "keep only
-    // what came after the compaction", which is the same intent.
-    return {
-      compaction: {
-        summary,
-        firstKeptEntryId: handoffCutPoint(event?.branchEntries, event.preparation.firstKeptEntryId),
-        tokensBefore: event.preparation.tokensBefore,
-      },
-    };
-  });
+  // ── Only the CURRENT chapter's script reaches the model ─────────────────
+  //
+  // This used to be a compaction, driven from chapter_done: arm a brief, wait
+  // for pi to settle, call ctx.compact(), and let the brief stand in as the
+  // summary. The goal was right and the mechanism was wrong, and the mechanism
+  // is where every fault lived — an arming flag, an isIdle poll, a 30-second
+  // floor, a 20-second fallback timer, a two-minute TTL on the brief, an
+  // onError path, an ordering rule (the next script must load AFTER the
+  // compaction), and a `wasHandingOff` guard to stop other turn_end work
+  // firing into the window. Eight moving parts for one sentence of intent.
+  //
+  // And it did not even do it. pi's cut point keeps the most recent
+  // `keepRecentTokens` of conversation, which is the right rule when the
+  // context got big and the wrong one at a chapter boundary: a chapter's
+  // conversation is ~5,500 tokens against a budget of 3,000-20,000, so the cut
+  // landed at or before the OUTGOING chapter's own script. Replayed over all
+  // 92 real handoffs on one machine, 40 kept the finished chapter's script
+  // alive, 39 then held TWO scripts at once, and 23 came out of the
+  // "compaction" bigger than they went in.
+  //
+  // MEASURED, and this is why the whole apparatus can go: a complete
+  // five-chapter session with compaction removed entirely is 37,000-44,000
+  // tokens of conversation, of which 12,500 is the five chapter scripts. That
+  // is not a size problem. The only thing worth removing is the stale scripts,
+  // and that is a filter, not a rewrite of the session.
+  //
+  // `context` fires before EVERY provider request (pi-agent-core agent-loop
+  // streamAssistantResponse -> transformContext, applied before convertToLlm)
+  // and may replace the message list. `customType` is still on the message at
+  // that point — the flattening to role "user" happens after. So this is a
+  // pure function of the outbound payload, recomputed every turn:
+  //
+  //   · nothing to arm, nothing to time, nothing to race
+  //   · no abort — the student never sees "This operation was aborted"
+  //   · IT CANNOT TOUCH THE RECORD. The session file, getBranch(),
+  //     session_log.jsonl and notebook.py are all downstream of nothing here.
+  //     Every other approach to this problem could damage a graded artifact;
+  //     this one structurally cannot.
+  //
+  // It also recovers most of the size anyway: one script instead of five takes
+  // the end-of-module context from ~44k to ~34k.
+  //
+  // ON THE HOT PATH, so it is small and it fails open. A throw here would break
+  // every request in the session; returning nothing leaves the payload as it
+  // was, which is exactly today's behaviour.
+  try {
+    pi.on("context", async (event: any) => {
+      try {
+        const msgs: any[] = Array.isArray(event?.messages) ? event.messages : [];
+        const kept = keepCurrentChapterScript(msgs);
+        return kept ? { messages: kept } : undefined;
+      } catch {
+        return; // the payload as it stands is always a safe answer
+      }
+    });
+  } catch {
+    // An older pi without the context hook: the tutor carries every script,
+    // which is what it did before this existed.
+  }
 
   // ── chapter_done ──────────────────────────────────────────────────────────
   pi.registerTool({
@@ -3937,93 +3939,53 @@ export default function (pi: ExtensionAPI) {
         `checkpoint in this chapter asks for the photo, in one line, and waits.\n` +
         `The notebook already contains every cell built so far — never rebuild them. ` +
         `Continue warmly with the same voice; your new CHAPTER SCRIPT message has the curriculum.`;
-      pendingHandoffBrief = brief;
-      handoffArmedAt = Date.now();
-      // The next chapter must load AFTER compaction: injecting before it
-      // races the session reload (the fresh turn gets aborted and nothing
-      // restarts — seen in production) and the script could be summarized
-      // away. loadOnce also serves as the fallback when compaction errors
-      // (e.g. nothing to compact) or never calls back.
+      // ── The handoff, as a message ────────────────────────────────────────
+      // The brief used to be a COMPACTION SUMMARY: chapter_done armed it, a
+      // poll waited for pi to settle, ctx.compact() replaced the conversation
+      // with it, and the next chapter loaded from the completion callback.
+      // That is gone — see the `context` filter above for the measurements
+      // that retired it. The brief is simply injected now, like every other
+      // thing this toolkit tells the tutor, and the chapter loads in the same
+      // breath.
+      //
+      // What that deletes: the arming flag, the isIdle poll and its re-arm,
+      // the 30-second floor, the 20-second fallback timer, the two-minute TTL
+      // that stopped a stale brief being eaten by an unrelated compaction, the
+      // onError path, and the rule that the script must not be injected until
+      // compaction finished. Also the abort: nothing here interrupts the
+      // request in flight, so the "Error: This operation was aborted" that
+      // used to print at every chapter turn cannot happen.
+      //
+      // The conversation stays. The tutor keeps chapter 1 in full and reads
+      // the brief on top of it — which is more than the summary ever gave it,
+      // at a measured cost of a few thousand tokens.
       const num = idx + 2;
-      let loaded = false;
-      const loadOnce = () => {
-        if (loaded) return;
-        loaded = true;
-        // Any note the notebook was down for goes in BEFORE the next
-        // chapter's heading. A live run killed marimo during cp1_routing;
-        // its note was parked, the chapter turned over, and the recovered
-        // note landed under "── Chapter 2 ──" — a chapter-1 answer filed
-        // inside chapter 2, in the keepsake the student submits. Every
-        // other insertion point already flushes first; this was the one
-        // that did not.
-        void flushParkedNotes().then(() => insertChapterHeader(next, num, chapters.length));
-        pi.sendMessage(
-          {
-            customType: "chapter-divider",
-            content: `── Chapter ${num} · ${next.title} ──`,
-            display: true,
-          },
-          { deliverAs: "followUp" },
-        );
-        pi.sendMessage(
-          {
-            customType: "chapter-script",
-            content: chapterScriptMessage(next, num, chapters.length),
-            display: false,
-          },
-          { deliverAs: "followUp", triggerTurn: true },
-        );
-      };
-      // Compaction aborts whatever model request is in flight — and the one
-      // in flight right now is the tutor saying the bridge sentence this very
-      // tool result asks for. Started here, it printed a red
-      // "Error: This operation was aborted" into the student's terminal at
-      // every chapter turn, four times a session, with nothing actually
-      // wrong. So it is armed here and fired at message_end, once the tutor
-      // has finished speaking.
-      const armCompaction = async () => {
-        // Wait for pi to actually settle. turn_end fires while the run is
-        // still winding down, and compacting then aborts it — which the
-        // student reads as "Error: This operation was aborted", in red, at
-        // every chapter boundary. isIdle() is the difference between "the
-        // tutor has stopped talking" and "there is nothing left to abort".
-        //
-        // Ten seconds is a bound, not a decision. When it runs out the old
-        // code compacted ANYWAY — into a run that was, by its own test, still
-        // going — which is the abort this poll exists to avoid, just later and
-        // rarer. `turn_end` fires per assistant message, so the first one to
-        // arrive is the chapter_done tool turn itself, before the bridge
-        // sentence the tool result asks for; the poll is what usually covers
-        // that gap. Re-arm instead: the next turn_end tries again, and the 30s
-        // floor below is the backstop for a tutor that never speaks again.
-        for (let i = 0; i < 40 && ctx?.isIdle && !ctx.isIdle(); i++) {
-          await new Promise((r) => setTimeout(r, 250));
-        }
-        if (ctx?.isIdle && !ctx.isIdle()) {
-          pendingCompaction = armCompaction;
-          return;
-        }
-        try {
-          ctx?.compact?.({
-            customInstructions: "chapter handoff",
-            onComplete: loadOnce,
-            onError: () => {
-              pendingHandoffBrief = null;
-              loadOnce();
-            },
-          });
-          const timer = setTimeout(loadOnce, 20_000);
-          (timer as any).unref?.();
-        } catch {
-          pendingHandoffBrief = null;
-          loadOnce();
-        }
-      };
-      pendingCompaction = armCompaction;
-      // A floor under it: a tutor that says nothing at all may never produce
-      // a message_end, and a chapter that never loads strands the student.
-      const armed = setTimeout(runPendingCompaction, 30_000);
-      (armed as any).unref?.();
+      // Any note the notebook was down for goes in BEFORE the next chapter's
+      // heading. A live run killed marimo during cp1_routing; its note was
+      // parked, the chapter turned over, and the recovered note landed under
+      // "── Chapter 2 ──" — a chapter-1 answer filed inside chapter 2, in the
+      // keepsake the student submits.
+      void flushParkedNotes().then(() => insertChapterHeader(next, num, chapters.length));
+      pi.sendMessage(
+        { customType: "chapter-handoff", content: brief, display: false },
+        { deliverAs: "followUp" },
+      );
+      pi.sendMessage(
+        {
+          customType: "chapter-divider",
+          content: `── Chapter ${num} · ${next.title} ──`,
+          display: true,
+        },
+        { deliverAs: "followUp" },
+      );
+      pi.sendMessage(
+        {
+          customType: "chapter-script",
+          content: chapterScriptMessage(next, num, chapters.length),
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
       return {
         content: [
           {
@@ -6495,6 +6457,106 @@ export default function (pi: ExtensionAPI) {
     ...quiet("Looking at your photo…"),
   });
 
+  // ── session_recall ────────────────────────────────────────────────────────
+  // The tutor could not read its own record, and that is a door this toolkit
+  // closed itself: `nb_run` used to be how a model got at session_log.jsonl —
+  // 66 of the 87 nb_run calls in this machine's history were exactly that —
+  // and the kernel guard now refuses every path to those filenames. Correctly:
+  // hand-written rows drift. But refusing to WRITE is not a reason to refuse
+  // to READ, and a student who asks "what did I say at checkpoint 3?"
+  // deserves an answer.
+  //
+  // The LOG, not the transcript, and the difference matters:
+  //   · the log is the truth. The transcript also holds the tutor's own
+  //     withdrawn wording, its refused `NOT LOGGED` attempts, and every
+  //     invisible brief this extension injects — CHAPTER SCRIPT, RESUME
+  //     CONTEXT, NOTE (invisible to the student). INJECTED_PREFIX exists
+  //     because those leaking back as "what the student said" corrupted a
+  //     graded row once already: a row in this repo carries 44 words of
+  //     chapter prose as a student's first utterance. A transcript search
+  //     would be a new door to that.
+  //   · it is small enough not to need searching. A whole module's log is
+  //     nine rows and about 1,200 tokens; there is nothing to index.
+  //
+  // Read-only by construction: it opens the file and formats it. Nothing here
+  // can write a row.
+  pi.registerTool({
+    name: "session_recall",
+    label: "Look back at the record",
+    description:
+      "Read what has already been logged this module — the student's own words, your " +
+      "judgment and hint count per checkpoint, and every question they asked. Use it when " +
+      "they refer back (\"what did I say about the bridges?\"), when you need an anchor from " +
+      "an earlier chapter, or before claiming something was or was not covered. " +
+      "This is the graded record, so it is the truth about what happened; your memory of " +
+      "the conversation is not. It is READ-ONLY — checkpoint_done, log_detour and " +
+      "chapter_done are the only things that write it.",
+    promptSnippet: "Read the session log — what was answered, asked and judged so far",
+    parameters: Type.Object({
+      status: STATUS_PARAM,
+      checkpoint: Type.Optional(
+        Type.String({
+          description:
+            "One checkpoint id (e.g. 'cp2_degree') for its full row. Omit for the whole " +
+            "module at a glance.",
+        }),
+      ),
+    }),
+    async execute(_id, params) {
+      const entries = readSessionLog();
+      if (!entries.length) {
+        return toResult({ out: "Nothing logged yet — this session has not closed a checkpoint.", failed: false });
+      }
+      const want = String(params.checkpoint ?? "").trim();
+      if (want) {
+        const rows = entries.filter(
+          (e: any) => String(e?.id ?? "") === want || baseCheckpointId(String(e?.id ?? "")) === want,
+        );
+        if (!rows.length) {
+          return toResult({
+            out:
+              `No row for "${want}". Logged so far: ` +
+              entries
+                .filter((e: any) => e?.type === "checkpoint")
+                .map((e: any) => e.id)
+                .join(", "),
+            failed: false,
+          });
+        }
+        // The whole row, formatted. It is a few hundred tokens and every field
+        // on it is something the model might be about to get wrong from memory.
+        return toResult({
+          out: rows
+            .map((r: any) =>
+              [
+                `${r.id} — ${r.judgment}${r.hints_used ? `, ${r.hints_used} hint(s)` : ""}`,
+                `  asked: ${String(r.question ?? "").slice(0, 300)}`,
+                `  you logged: ${String(r.student_response ?? "").slice(0, 300)}`,
+                `  they typed: ${JSON.stringify(r.student_said_verbatim ?? [])}`,
+                ...(r.student_picked ? [`  they picked: ${JSON.stringify(r.student_picked)}`] : []),
+                ...(r.notes ? [`  your notes: ${String(r.notes).slice(0, 300)}`] : []),
+              ].join("\n"),
+            )
+            .join("\n\n"),
+          failed: false,
+        });
+      }
+      const detours = entries.filter((e: any) => e?.type === "detour");
+      return toResult({
+        out:
+          `Checkpoints logged this module:\n${progressBrief(entries)}\n\n` +
+          (detours.length
+            ? `Questions they asked (${detours.length}):\n` +
+              detours.map((d: any) => `  · ${String(d.question ?? "").slice(0, 160)}`).join("\n") +
+              `\n\n`
+            : `No questions logged yet.\n\n`) +
+          `Ask for one checkpoint by id to see their exact words on it.`,
+        failed: false,
+      });
+    },
+    ...quiet("Looking back at our notes…"),
+  });
+
   // ── nb_notebook_url ───────────────────────────────────────────────────────
   // "Where is the notebook?" had no answer, and what the tutor did with the
   // gap was invent one: a live run told the student to run `marimo edit
@@ -6745,29 +6807,10 @@ export default function (pi: ExtensionAPI) {
   // any turn that produced words or a tool call — see the bottom of turn_end.
   let emptyTurns = 0;
   pi.on("turn_end", async (event: any) => {
-    // Read before runPendingCompaction() nulls it: the stall nudge at the
-    // bottom must not fire into a chapter handoff.
-    // `pendingHandoffBrief`, not `pendingCompaction`. The latter is nulled by
-    // runPendingCompaction() three lines below and therefore ALWAYS false
-    // where this is read — so the empty-turn nudge was never actually held
-    // back during a handoff, which is the one window it must not fire in
-    // (chapter_done ends its turn on a bridge sentence, compaction fires right
-    // here, and a message injected into that window is the "Error: This
-    // operation was aborted" the comment below exists to prevent). The brief
-    // is non-null from chapter_done until session_before_compact consumes it,
-    // which is exactly the window.
-    const wasHandingOff = !!pendingHandoffBrief || !!pendingCompaction;
     if (triviaTimer) {
       clearInterval(triviaTimer);
       triviaTimer = null;
     }
-    // chapter_done arms compaction and leaves the firing to us. It has to be
-    // turn_end, not message_end: message_end lands as soon as the tool-calling
-    // message is complete, which is BEFORE the tutor says the bridge sentence
-    // that same tool result asks for — so compaction aborted it and the
-    // student read "Error: This operation was aborted" instead. A turn ends
-    // once the tutor has actually stopped talking.
-    runPendingCompaction();
     // ── Telling the student the ⚖️ box exists ────────────────────────────
     // The appeal box is the student's only way out from under a tutor that
     // has stopped helping, and nothing ever mentions it to them: AGENTS.md
@@ -6882,7 +6925,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     emptyTurns += 1;
-    if (wasHandingOff || emptyTurns > 2) return;
+    if (emptyTurns > 2) return;
     try {
       pi.sendMessage(
         {

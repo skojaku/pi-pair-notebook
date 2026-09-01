@@ -13,11 +13,11 @@ import {
   bigramDice,
   capturePick,
   driftIsReportable,
-  handoffCutPoint,
   editDistanceAtMost,
   isDialogSentinel,
   isFigure,
   isFillerMessage,
+  keepCurrentChapterScript,
   matchDetourQuestion,
   normMsg,
   renderNoteSkeleton,
@@ -883,21 +883,45 @@ test("a slot whose instruction runs to several lines still takes its fold with i
   assert.equal(out, "### The paperwork");
 });
 
+
 // ---------------------------------------------------------------------------
-// handoffCutPoint — where a chapter-boundary compaction cuts
+// keepCurrentChapterScript — one curriculum in context, not five
 // ---------------------------------------------------------------------------
 
-test("the cut lands on the chapter boundary, not on pi's token budget", () => {
-  // Replayed across all 92 real handoffs on one machine, pi's own cut point
-  // kept the finished chapter's script alive at 40 of them; this keeps it at 0.
-  const branch = [{ id: "a" }, { id: "b" }, { id: "chapter_done_turn" }];
-  assert.equal(handoffCutPoint(branch, "pi-would-say-this"), "chapter_done_turn");
+const script = (n: number) => ({ customType: "chapter-script", content: `CHAPTER SCRIPT ${n}/5` });
+const said = (t: string) => ({ role: "user", content: t });
+
+test("only the newest chapter script survives", () => {
+  // A real six-chapter session: 108 messages, 6 scripts, 22,648 tokens in;
+  // 103 messages, 1 script, 18,446 tokens out, and nothing else removed.
+  const msgs = [script(1), said("a"), said("b"), script(2), said("c"), script(3), said("d")];
+  const out = keepCurrentChapterScript(msgs)!;
+  assert.equal(out.filter((m) => m.customType === "chapter-script").length, 1);
+  assert.equal(out[out.length - 2], msgs[5], "the one it keeps is the LAST script");
 });
 
-test("an empty or unreadable branch falls back to pi's cut point", () => {
-  // Never worse than what pi would have done on its own.
-  assert.equal(handoffCutPoint([], "pi-cut"), "pi-cut");
-  assert.equal(handoffCutPoint(undefined, "pi-cut"), "pi-cut");
-  assert.equal(handoffCutPoint("not a list", "pi-cut"), "pi-cut");
-  assert.equal(handoffCutPoint([{ noId: true }], "pi-cut"), "pi-cut");
+test("nothing but scripts is ever dropped", () => {
+  // The conversation stays. That is the whole difference from the compaction
+  // this replaced, which threw a chapter away and put a paragraph in its place.
+  const msgs = [script(1), said("a"), said("b"), script(2), said("c")];
+  const out = keepCurrentChapterScript(msgs)!;
+  assert.deepEqual(
+    out.filter((m) => m.customType !== "chapter-script"),
+    msgs.filter((m) => m.customType !== "chapter-script"),
+  );
+});
+
+test("one script, or none, is left alone", () => {
+  // null means "do not touch the payload" — the safe answer, and the common
+  // one: every turn of chapter 1 takes this path.
+  assert.equal(keepCurrentChapterScript([script(1), said("a")]), null);
+  assert.equal(keepCurrentChapterScript([said("a"), said("b")]), null);
+  assert.equal(keepCurrentChapterScript([]), null);
+});
+
+test("a message with no customType is not mistaken for a script", () => {
+  const msgs = [script(1), { role: "user", content: "x" }, script(2)];
+  const out = keepCurrentChapterScript(msgs)!;
+  assert.equal(out.length, 2);
+  assert.ok(out.some((m) => (m as { role?: string }).role === "user"));
 });
