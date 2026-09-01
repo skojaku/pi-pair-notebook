@@ -7,20 +7,23 @@ Reads the sandbox named in the state file and prints, in one screen:
 
   BUILD    the cells the checkpoint's `build:` line names, and whether each
            one is in the notebook
-  NOTE     whether <checkpoint>_note landed, and whether any «slot» in it was
-           left unfilled
+  NOTE     whether <checkpoint>_note landed. It is the instructor's prose
+           and nothing else now: the note cell no longer quotes the student.
+           Their words are in the LOG row below, in session_summary.md and in
+           the session_record cell — three copies, none of which has to
+           choose which message to copy, which is why none of them can choose
+           wrong.
   LOG      the checkpoint's row, with the flags the extension stamps on a row
            it had to repair or give up on (build_missing, photo_missing,
-           verbatim_drift, id_snapped_from, note_skipped_msgs, …)
+           verbatim_drift, id_snapped_from, answers_counted, …)
 
-           Two of these mean different things and are easy to confuse.
            `verbatim_drift` is INVENTION — words attributed to the student
-           that they never produced — and the extension refuses the close
-           twice before it lands. `note_quotes_short` and
-           `closed_without_speaking` are records that are TRUE and less
-           good; nothing was refused, and they are here because the row
-           should say what happened, not because anything went wrong with
-           the student's work.
+           that they never produced, in `student_response` — and the
+           extension refuses the close twice before it lands.
+           `closed_without_speaking` is a record that is TRUE and less good;
+           nothing was refused, and it is here because the row should say
+           what happened, not because anything went wrong with the student's
+           work.
   EXTRA    named cells the tutor added that the script never asked for — a
            souvenir cell for a detour is the good case, a stray heading is not
 
@@ -115,14 +118,18 @@ def main():
     note_name = f"{cp}_note"
     if note_name in names:
         body = re.split(r"(?m)^@app\.cell", text)[names.index(note_name) + 1]
-        slots = re.findall(r"«[^»]*»", body)
         print(f"  OK    {note_name} ({len(body)} chars)")
+        # A marker that reached the student's notebook. The extension strips
+        # these when it renders a skeleton, so one here means either an
+        # un-updated toolkit or a shape renderNoteSkeleton does not know.
+        slots = re.findall(r"«[^»]*»", body)
         if slots:
-            print(f"  UNFILLED SLOTS: {slots}")
-        quoted = re.findall(r"^\s*> .*$", body, re.M)
-        print(f"  quoted lines in the fold: {len(quoted)}")
-        for q in quoted[:6]:
-            print(f"    {q.strip()[:120]}")
+            print(f"  ⚠ SLOT MARKER IN THE STUDENT'S NOTEBOOK: {slots}")
+        # The note is the instructor's prose now. A fold with a student-facing
+        # title and nothing in it is what an un-updated lesson script leaves.
+        for fold in re.findall(r"/// details \| ([^\n]*)\n(.*?)///", body, re.S):
+            if not re.sub(r"\*\*[^*]*:\*\*", "", re.sub(r"^\s*\w[\w-]*:.*$", "", fold[1], flags=re.M)).strip(" >\n\t"):
+                print(f"  ⚠ EMPTY FOLD: '{fold[0].strip()}' — nothing inside it")
     else:
         print(f"  MISSING  {note_name}")
 
@@ -164,14 +171,8 @@ def main():
                 "verbatim_drift",
                 "id_snapped_from",
                 "response_retyped_as",
-                "slot_quotes_repaired",
-                "note_quotes_msgs",
-                "note_quotes_short",
-                "note_skipped_msgs",
-                "note_window_from_msg",
                 "turns_in_checkpoint",
                 "closed_without_speaking",
-                "figures_not_quoted",
                 "closed_by_referee",
                 # How many of student_said_verbatim the late-close gate counted
                 # as answers to THIS checkpoint. Present only when a detour ate

@@ -12,34 +12,28 @@ import {
   baseCheckpointId,
   bigramDice,
   capturePick,
-  chooseQuoted,
-  chooseQuotedWithFallback,
   driftIsReportable,
   editDistanceAtMost,
-  fillSlots,
   isDialogSentinel,
   isFigure,
   isFillerMessage,
   matchDetourQuestion,
   normMsg,
+  renderNoteSkeleton,
   notebookBanner,
   answerCountForGate,
   pickIsMechanics,
   quoteIsBacked,
-  repairQuotes,
   rewriteRivalServer,
   souvenirVerdict,
+  withQuotedQuestion,
   STUCK_ANSWERS,
   stripModelQuoteLines,
   scriptedQuestionCount,
   slotDrift,
-  slotMarkers,
   slotTokens,
   snapCheckpointId,
   snapToTranscript,
-  truncatedQuote,
-  verbatimFill,
-  withQuotedQuestion,
 } from "../extensions/lib/verbatim.ts";
 
 const NO_DETOURS = { detourSpans: [] as [number, number][], detourAsked: new Set<string>() };
@@ -140,173 +134,6 @@ test("nothing to repair when the text is already in the transcript", () => {
 
 // ---------------------------------------------------------------------------
 // truncatedQuote  (fd45061 and its correction 08a6620)
-// ---------------------------------------------------------------------------
-
-test("a quote that stops partway through their sentence is caught", () => {
-  const said = [
-    "6 choose 2 is 15, and the outer friends each only have 1 friend so they cant center any",
-  ];
-  const hit = truncatedQuote('"6 choose 2 is 15"', said);
-  assert.ok(hit, "expected the dropped reasoning to be reported");
-  assert.match(hit.rest, /outer friends/);
-});
-
-test("a correct quote is not called a truncation of a later elaboration", () => {
-  // Students elaborate. Quoting the first message exactly is right by
-  // definition, even when a later one opens with the same words.
-  const said = ["i think its 2", "i think its 2 because they are neighbours on the ring"];
-  assert.equal(truncatedQuote('"i think its 2"', said), null);
-});
-
-test("quoting some turns and not others is not a truncation", () => {
-  const said = ["2", "and the average is 7/6", "that felt slow"];
-  assert.equal(truncatedQuote('"2" · "and the average is 7/6"', said), null);
-});
-
-// ---------------------------------------------------------------------------
-// repairQuotes
-// ---------------------------------------------------------------------------
-
-test("a near-copy quote inside a model slot is replaced with their words", () => {
-  const r = repairQuotes(
-    'their reason: “becuase tirangles are ipormtat”',
-    ["becuase tirangles are ipmortat"],
-  );
-  assert.deepEqual(r.snapped, ["becuase tirangles are ipormtat"]);
-  assert.match(r.text, /ipmortat/);
-});
-
-test("a short quote is a label, not speech", () => {
-  const r = repairQuotes('the widget read “2.07”', ["i moved the slider"]);
-  assert.deepEqual(r.invented, []);
-});
-
-test("a three-word quote matching nothing they said is reported", () => {
-  const r = repairQuotes('“P is 3, Q is 3, R is 2”', ["i counted them one at a time"]);
-  assert.equal(r.invented.length, 1);
-});
-
-test("a picker answer is not treated as invented when the pool carries it", () => {
-  // Comparing against the typed transcript alone once accused a student of
-  // inventing their own picker choice.
-  const r = repairQuotes('“about 20 hands”', ["about 20 hands"]);
-  assert.deepEqual(r.invented, []);
-});
-
-// ---------------------------------------------------------------------------
-// chooseQuoted — the capture window
-// ---------------------------------------------------------------------------
-
-test("a message typed before the tutor spoke here is skipped", () => {
-  const said = ["yes ready!", "the distance is 2"];
-  const { keep } = chooseQuoted({
-    said,
-    response: "the distance is 2",
-    cut: 1,
-    dropDetours: true,
-    ...NO_DETOURS,
-  });
-  assert.deepEqual(keep, ["the distance is 2"]);
-});
-
-test("a figure rescues a message the boundary would have dropped", () => {
-  // A student who volunteers the answer before being asked keeps it.
-  const said = ["i think its 7/6 already", "yeah"];
-  const { keep } = chooseQuoted({
-    said,
-    response: "7/6",
-    cut: 2,
-    dropDetours: true,
-    ...NO_DETOURS,
-  });
-  assert.ok(keep.includes("i think its 7/6 already"));
-});
-
-test("the logged answer is always kept, whatever the boundary says", () => {
-  const said = ["the answer is two"];
-  const { keep } = chooseQuoted({
-    said,
-    response: "the answer is two",
-    cut: 1,
-    dropDetours: true,
-    ...NO_DETOURS,
-  });
-  assert.deepEqual(keep, said);
-});
-
-test("a detour's whole exchange is skipped, not just the question", () => {
-  // "yes please, that would help" — the student accepting an offered
-  // souvenir — was filed as their worked answer on the routing question.
-  const said = ["2 out of 10", "wait what is that called?", "yes please, that would help", "0.2"];
-  const { keep } = chooseQuoted({
-    said,
-    response: "0.2",
-    cut: 0,
-    dropDetours: true,
-    detourSpans: [[1, 2]],
-    detourAsked: new Set([normMsg("wait what is that called?")]),
-  });
-  assert.deepEqual(keep, ["2 out of 10", "0.2"]);
-});
-
-test("an answer given BEFORE the detour survives it", () => {
-  // A span, not a new window start: anything that moved the window forward to
-  // the detour would take every earlier answer with it.
-  const said = ["2 out of 10", "wait what is that called?", "ok thanks"];
-  const { keep } = chooseQuoted({
-    said,
-    response: "2 out of 10",
-    cut: 0,
-    dropDetours: true,
-    detourSpans: [[1, 2]],
-    detourAsked: new Set([normMsg("wait what is that called?")]),
-  });
-  assert.ok(keep.includes("2 out of 10"));
-});
-
-test("the note never falls through to the model's own wording", () => {
-  // If every narrowing empties the window, they give way — newest first.
-  const said = ["hello? are you still there?"];
-  const r = chooseQuotedWithFallback({
-    said,
-    response: "the model's paraphrase",
-    cut: 1,
-    dropDetours: true,
-    ...NO_DETOURS,
-  });
-  assert.deepEqual(r.keep, said);
-  assert.equal(r.cutUsed, 0);
-});
-
-// ---------------------------------------------------------------------------
-// fillSlots
-// ---------------------------------------------------------------------------
-
-test("an unfilled slot renders the placeholder, not the previous fill", () => {
-  const out = fillSlots("A: «one» B: «two»", ["x"], "");
-  assert.equal(out, "A: x B: *(not answered)*");
-});
-
-test("the fallback is spent once, never printed twice in one line", () => {
-  // "**My guess:** way off, i said 20 — "way off, i said 20"" is what the
-  // second use looked like.
-  const out = fillSlots("«a» — «b»", [], "way off, i said 20");
-  assert.equal(out, "way off, i said 20 — *(not answered)*");
-});
-
-test("a whitespace pad does not count as a fill", () => {
-  assert.equal(fillSlots("«a»", ["   "], ""), "*(not answered)*");
-});
-
-test("slotMarkers finds the markers in order", () => {
-  assert.deepEqual(slotMarkers("> «their pick» — «their line, verbatim»"), [
-    "«their pick»",
-    "«their line, verbatim»",
-  ]);
-});
-
-// ---------------------------------------------------------------------------
-// withQuotedQuestion
 // ---------------------------------------------------------------------------
 
 test("the question is not quoted twice when the cell already has it", () => {
@@ -483,29 +310,6 @@ test("adding 'that' does not swallow the answers ACK_WORDS was burned on", () =>
   assert.equal(isFillerMessage("thats the one"), false);
   assert.equal(isFillerMessage("that world"), false);
 });
-
-test("a photo-only checkpoint does not put the model's words in their fold", () => {
-  // cp2_paperwork, from the same run: the student uploaded a page and typed
-  // nothing, so the «verbatim» slot fell through to student_response — a
-  // parenthetical the MODEL wrote — inside a fold headed "My work".
-  const response = "(photo of hand-worked table: 5-ring, all 10 pairs, sum 15, average 1.5)";
-  assert.equal(verbatimFill([], response, { photoAnswered: true }), "*(answered on paper — the photo is above)*");
-});
-
-test("with nothing typed and no photo, the fallback is unchanged", () => {
-  assert.equal(verbatimFill([], "their answer", {}), "their answer");
-});
-
-test("anything they typed still wins", () => {
-  assert.equal(
-    verbatimFill(["i put it there because"], "x", { photoAnswered: true }),
-    '"i put it there because"',
-  );
-});
-
-// ---------------------------------------------------------------------------
-// capturePick — which dialog answers reach the graded record
-// ---------------------------------------------------------------------------
 
 /**
  * The real shape, copied from a live session file:
@@ -838,9 +642,8 @@ test("a souvenir with a picture and a quote has no gap", () => {
 // answerCountForGate — a detour's turns are not answers to the checkpoint
 // ---------------------------------------------------------------------------
 
-const gateWindow = (said: string[], spans: [number, number][], response = "") => ({
+const gateWindow = (said: string[], spans: [number, number][]) => ({
   said,
-  response,
   detourSpans: spans,
   detourAsked: new Set<string>(),
 });
@@ -951,84 +754,20 @@ test("even a word-perfect quote is the extension's to write, not the model's", (
 // mechanicsAsked — "where is my notebook" is not an answer (#12)
 // ---------------------------------------------------------------------------
 
-test("a where-is-my-notebook exchange is kept out of the note cell", () => {
-  // Live Part D run, cp1_bridges. All three messages were typed after the
-  // tutor spoke, none is filler, and nothing called log_detour — so every
-  // existing narrowing kept them, and the keepsake read:
-  //   "My guess, and how far I got: no, it's impossible — "Which notebook you
-  //    mean? …" · "this terminal is you though …" · "ok i can see it now …"
-  const said = [
-    "Which notebook you mean? Is it m01lab notebook or some other notebook? I don't really know which notebook you mean.",
-    "this terminal is you though. and i did not see the browser open. nothing happened when i clicked it",
-    "ok i can see it now. i tried starting from the north bank and went A B C D but then i was stuck with two bridges left and no way back",
-  ];
-  const mechanicsAsked = new Set([normMsg(said[0]), normMsg(said[1])]);
-  const r = chooseQuoted({
-    said,
-    response: "tried from the north bank, A B C D, stuck with two bridges left",
-    cut: 0,
-    ...NO_DETOURS,
-    mechanicsAsked,
-    dropDetours: true,
-  });
-  assert.deepEqual(r.keep, [said[2]], "only their actual answer belongs in the note");
-});
-
-test("their real answer comes back even if it was marked", () => {
-  // The rescue that makes this safe: content may only ever RESCUE. If the
-  // tutor logged a marked message as the answer, it is the answer.
-  const said = ["i did not see the browser open"];
-  const r = chooseQuoted({
-    said,
-    response: "i did not see the browser open",
-    cut: 0,
-    ...NO_DETOURS,
-    mechanicsAsked: new Set([normMsg(said[0])]),
-    dropDetours: true,
-  });
-  assert.deepEqual(r.keep, said);
-});
-
-test("marking every message leaves the note its fallback, not nothing", () => {
-  // The cascade must still hand the window back rather than let the note fall
-  // through to the MODEL's wording — the thing every check here exists to stop.
-  const said = ["where is the notebook", "i still cannot see it"];
-  const r = chooseQuotedWithFallback({
-    said,
-    response: "(nothing they typed)",
-    cut: 0,
-    ...NO_DETOURS,
-    mechanicsAsked: new Set(said.map(normMsg)),
-    dropDetours: true,
-  });
-  assert.deepEqual(r.keep, said);
-});
-
-test("an unmarked session behaves exactly as before", () => {
-  // mechanicsAsked is optional, and absent it must change nothing.
-  const said = ["2", "and the average is 7/6"];
-  const w = { said, response: "7/6", cut: 0, ...NO_DETOURS, dropDetours: true };
-  assert.deepEqual(chooseQuoted(w).keep, chooseQuoted({ ...w, mechanicsAsked: new Set() }).keep);
-});
-
-// ---------------------------------------------------------------------------
-// STUCK_ANSWERS — counting exchanges, not turns (#3)
-// ---------------------------------------------------------------------------
-
 test("a checkpoint answered in a couple of tries is not stuck", () => {
   // The measured ratio is 2.6 assistant turns per student message, so twelve
   // turns was four or five exchanges — and an m02 review saw the ⚖️ nudge land
   // "right after the very first wrong turn".
   const said = ["is it 3?", "oh wait, 5"];
   assert.ok(
-    answerCountForGate({ said, response: "5", ...NO_DETOURS }) < STUCK_ANSWERS,
+    answerCountForGate({ said, ...NO_DETOURS }) < STUCK_ANSWERS,
     "two answers must not read as stuck",
   );
 });
 
 test("six answers at one checkpoint is stuck", () => {
   const said = ["3", "4", "maybe 5", "im not sure", "6?", "7"];
-  assert.ok(answerCountForGate({ said, response: "7", ...NO_DETOURS }) >= STUCK_ANSWERS);
+  assert.ok(answerCountForGate({ said, ...NO_DETOURS }) >= STUCK_ANSWERS);
 });
 
 test("a curious student is not a stuck one", () => {
@@ -1037,7 +776,108 @@ test("a curious student is not a stuck one", () => {
   const said = ["is it 3?", "whats a multigraph?", "ah ok", "and a trail?", "got it", "its 5"];
   const detourSpans: [number, number][] = [[1, 2], [3, 4]];
   assert.ok(
-    answerCountForGate({ said, response: "its 5", detourSpans, detourAsked: new Set() }) <
+    answerCountForGate({ said, detourSpans, detourAsked: new Set() }) <
       STUCK_ANSWERS,
   );
+});
+
+// ---------------------------------------------------------------------------
+// renderNoteSkeleton — the note cell stopped quoting the student
+// ---------------------------------------------------------------------------
+
+test("the fold that held the student's answer is removed whole", () => {
+  // m01 ch1-hook.yaml, verbatim. The toolkit ships before the lesson YAML is
+  // edited, so a student on the new toolkit and an old module is the normal
+  // state for a while — and «their own report of the attempt, verbatim» must
+  // never render into their notebook.
+  const skeleton = [
+    "### The seven bridges of Königsberg",
+    "Every Sunday the citizens of Königsberg set each other the same",
+    "challenge. Cross all **seven bridges exactly once**, and come back to",
+    "where you started.",
+    "",
+    "Nobody managed it, and nobody could show it was impossible.",
+    "",
+    "/// details | My guess, and how far I got",
+    "    type: lh-answer",
+    "> «their pick» — «their own report of the attempt, verbatim»",
+    "///",
+  ].join("\n");
+  const out = renderNoteSkeleton(skeleton);
+  assert.ok(!out.includes("«"), out);
+  assert.ok(!out.includes("»"), out);
+  // The whole fold goes: an empty collapsible titled "My guess, and how far I
+  // got" is worse than no fold.
+  assert.ok(!out.includes("My guess"), out);
+  assert.ok(!out.includes("details"), out);
+  // The instructor's prose is untouched.
+  assert.ok(out.startsWith("### The seven bridges of Königsberg"));
+  assert.ok(out.includes("nobody could show it was impossible"));
+});
+
+test("a fold that holds real prose keeps it", () => {
+  // Only a fold whose whole body is slots is dropped. One the instructor wrote
+  // content into is theirs.
+  const skeleton = [
+    "### Degrees",
+    "",
+    "/// details | Why two ends per edge",
+    "    type: lh-note",
+    "Every bridge has two ends, so the degrees add to twice the bridges.",
+    "///",
+  ].join("\n");
+  assert.equal(renderNoteSkeleton(skeleton), skeleton.trim());
+});
+
+test("a fold mixing prose and a slot keeps the prose", () => {
+  const skeleton = [
+    "/// details | My work",
+    "    type: lh-answer",
+    "The rule is that every dot needs an even number of lines.",
+    "> «their answer, verbatim»",
+    "///",
+  ].join("\n");
+  const out = renderNoteSkeleton(skeleton);
+  assert.ok(out.includes("every dot needs an even number of lines"));
+  assert.ok(!out.includes("«"));
+});
+
+test("a stray slot outside a fold is removed without taking the line's prose", () => {
+  const out = renderNoteSkeleton("You said: «their answer, verbatim» — and that is the rule.");
+  assert.equal(out, "You said:  — and that is the rule.");
+});
+
+test("a skeleton with no slots is returned as it stands", () => {
+  const skeleton = "### Title\n\nSome prose.\n\nMore prose.";
+  assert.equal(renderNoteSkeleton(skeleton), skeleton);
+});
+
+test("removing a slot does not open a hole in the prose", () => {
+  // A slot on its own line leaves a blank; two blanks read as a paragraph
+  // break the instructor did not write.
+  const out = renderNoteSkeleton("### T\n\nprose\n\n«their answer, verbatim»\n\nmore prose");
+  assert.ok(!/\n\n\n/.test(out), JSON.stringify(out));
+});
+
+test("a slot whose instruction runs to several lines still takes its fold with it", () => {
+  // cp2_paperwork, verbatim. Tested per line, `«[^»]*»` matches nothing here —
+  // and three of this course's skeletons kept an empty "My work" fold in the
+  // student's notebook because of it.
+  const skeleton = [
+    "### The paperwork",
+    "",
+    "/// details | My work",
+    "    type: lh-answer",
+    "> ",
+    ">",
+    '> **On paper:** «what my photo of the table shows, written as mine —',
+    '  "I listed all ten pairs and got…". A photographed answer never',
+    "  reaches the transcript, so this slot is yours to describe»",
+    "///",
+  ].join("\n");
+  const out = renderNoteSkeleton(skeleton);
+  assert.ok(!out.includes("«") && !out.includes("»"), out);
+  assert.ok(!out.includes("My work"), out);
+  assert.ok(!out.includes("On paper"), out);
+  assert.equal(out, "### The paperwork");
 });

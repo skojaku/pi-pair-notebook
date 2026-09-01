@@ -41,20 +41,16 @@ import {
   answerCountForGate,
   baseCheckpointId,
   capturePick,
-  chooseQuotedWithFallback,
   driftIsReportable,
-  fillSlots,
-  isFigure,
+  renderNoteSkeleton,
   matchDetourQuestion,
   normMsg,
   notebookBanner,
   NOTEBOOK_BANNER_PREFIX,
   type PickRecord,
   quoteIsBacked,
-  repairQuotes,
   rewriteRivalServer,
   slotDrift,
-  slotMarkers,
   SLOT_GLUE,
   slotTokens,
   snapToTranscript,
@@ -63,8 +59,6 @@ import {
   souvenirVerdict,
   STUCK_ANSWERS,
   stripModelQuoteLines,
-  verbatimFill,
-  truncatedQuote,
   withQuotedQuestion,
 } from "./lib/verbatim.ts";
 import {
@@ -1996,7 +1990,7 @@ let studentSaidMark = 0;
  * a stalled terminal, into cp3_average's. cp3_global_clustering's note was
  * clean in the same session because nothing intervened there, which is what
  * proves this is the window boundary and not a filtering gap. See
- * preQuestionCount.
+ * the note cell's own window, back when the note quoted them.
  *
  * An id and not an index. getBranch() walks the parent chain from the current
  * leaf, so a rewind or a re-branch hands back a different path, and a number
@@ -2090,7 +2084,7 @@ function partsText(c: any): string {
  * The student's own turns, each with WHERE in the branch it sits.
  *
  * The position is what gives the capture window a second edge instead of
- * being a tail — see preQuestionCount. Carried here rather than recomputed by
+ * being a tail. Carried here rather than recomputed by
  * a second walk with a second copy of the INJECTED_PREFIX / scriptProse
  * rules: two guards reading the same transcript and disagreeing about what
  * counts is how a `_photo` cell holding no upload came to be refused for
@@ -2610,99 +2604,6 @@ const mechanicsAsked = new Set<string>();
  */
 const CHAPTER_BOUNDARY_TYPES = new Set(["chapter-script", "chapter-divider"]);
 
-/**
- * How many of the messages studentSaidSince just handed back were typed
- * BEFORE the tutor said its first word at this checkpoint. 0 means "do not
- * narrow anything", and is the answer to every question this cannot settle.
- *
- * The capture window has only ever had one edge. It opens where the PREVIOUS
- * checkpoint closed — studentSaidMark advances in checkpoint_done and nowhere
- * else — so everything typed in the gap before the next question was ever put
- * is filed as the next checkpoint's worked answer. A live m02 session quoted
- * chapter 1's "yeah a little demo would be cool!" and "yes ready!" inside
- * cp2_distance's note, and "hello? are you still there?" — typed into a
- * terminal a silent turn had left dead — inside cp3_average's.
- *
- * No content test can reach that, and ACK_WORDS must not be asked to try. All
- * three are real sentences that mean what they say; what makes them wrong is
- * WHEN they were said. Catching them by vocabulary needs "demo", "hello",
- * "still", "there" — and the note on ACK_WORDS above already records `this` /
- * `that` / `one` being added and deleting half of a real answer, and `yes`
- * being held out on purpose because it can BE an answer.
- *
- * Two boundaries, later one wins:
- *
- *   B1, the chapter boundary. Nothing typed before this chapter's script
- *       arrived can answer this chapter's first question. This is the one
- *       that catches the two chapter-1 turns in cp2_distance's note.
- *
- *   B2, the tutor's first SPEECH after that. This is the one that catches the
- *       stall nudge: the assistant's turn between cp3_clustering closing and
- *       cp3_average being asked was literally empty, so it is not speech and
- *       not a candidate.
- *
- * "This checkpoint's first question" is deliberately defined as the tutor's
- * first SPEECH, not its first interrogative sentence, and it is deliberately
- * not matched against the script's `ask` block or against the logged
- * `question`. Both of those can anchor LATE, and a late anchor drops the
- * student's answer, which is worse than the bug: cp3_clustering asks four
- * numbered questions in four separate turns, and anchoring on the one the
- * tutor logged would take three real answers out of the keepsake. Anchoring
- * on the FIRST spoken turn cannot land after any of a checkpoint's own
- * questions. It errs early by construction — a bridge sentence, a tool
- * preamble, a late reveal all anchor before the real question — and the extra
- * turns that lets through are exactly the residue lib/verbatim.ts's ACK_WORDS
- * and isFillerMessage were built for (this file no longer imports either: the
- * narrowing runs inside chooseQuoted, and an import with no call site is what
- * test/imports.test.ts now refuses). The two defences split the work; neither
- * gives ground.
- */
-function preQuestionCount(ctx: any): number {
-  try {
-    const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
-    if (entries.length === 0) return 0;
-    let floor = -1;
-    if (closedAtEntryId !== null) {
-      floor = entries.findIndex((e: any) => e?.id === closedAtEntryId);
-      // The close is not on this branch any more (a rewind, a re-branch). We
-      // no longer know where the window starts, so we do not move it.
-      if (floor < 0) return 0;
-    }
-    // B1 — the last chapter boundary, if one is more recent than the close.
-    for (let i = entries.length - 1; i > floor; i--) {
-      const e = entries[i];
-      const ct = String(e?.customType ?? e?.message?.customType ?? "");
-      const text =
-        e?.type === "custom_message" ? partsText(e.content) : partsText(e?.message?.content);
-      if (CHAPTER_BOUNDARY_TYPES.has(ct) || /^(CHAPTER SCRIPT|── Chapter )/.test(text)) {
-        floor = i;
-        break;
-      }
-    }
-    // B2 — the tutor's first speech after that.
-    let anchor = -1;
-    for (let i = floor + 1; i < entries.length; i++) {
-      const e = entries[i];
-      if (e?.type !== "message" || e?.message?.role !== "assistant") continue;
-      if (partsText(e.message.content)) {
-        anchor = i;
-        break;
-      }
-    }
-    // The tutor has not spoken since the close. Then this checkpoint was never
-    // asked, there is no start to move the window to, and nothing is narrowed.
-    if (anchor < 0) return 0;
-    const turns = allStudentTurns(ctx).slice(studentSaidMark);
-    const cut = turns.filter((t) => t.at < anchor).length;
-    // Never the whole window. If nothing they typed lands after the tutor's
-    // first word, the anchor is wrong — and quoting too much is what this file
-    // does today, while quoting nothing puts the MODEL's wording in the note.
-    return cut >= turns.length ? 0 : cut;
-  } catch {
-    // a transcript we cannot read never narrows a window
-    return 0;
-  }
-}
 
 async function notebookCellNames(signal?: AbortSignal): Promise<string[] | null> {
   const r = await runKernel(
@@ -3203,15 +3104,6 @@ function buildSessionSummary(entries: any[], allCheckpoints: string[]): string {
       out.push(
         `Numbers they typed that no slot quotes: ${e.figures_not_quoted.join(", ")} ` +
           `(may be a self-correction or an aside — worth a glance)`,
-      );
-    }
-    if (Array.isArray(e.note_skipped_msgs) && e.note_skipped_msgs.length) {
-      out.push(
-        `Typed here but NOT quoted in the note: ${e.note_skipped_msgs
-          .map((n: unknown) => `msg ${n}`)
-          .join(", ")} (a question they already have a souvenir for, or ` +
-          `acknowledgement — the full list above is the record, and worth a ` +
-          `glance if one of these looks like part of their answer)`,
       );
     }
     out.push("");
@@ -4257,22 +4149,6 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
       notes: Type.String({ description: "One line: what their answer showed." }),
-      // A union with String because a small model reliably sends this array
-      // as a JSON string sooner or later, and a schema rejection here loses
-      // the whole close — the log row and the student's own words with it.
-      // Normalised in execute; the shape it asks for is still the array.
-      note_slots: Type.Optional(
-        Type.Union([Type.Array(Type.String()), Type.String()], {
-          description:
-            "Fills for the «slots» in the script's note: skeleton that a transcript " +
-            "cannot supply — what their drawing shows, which option they picked, the " +
-            "numbers a widget displayed. ONE per such slot, in order, as an array of " +
-            "strings. Slots marked «… verbatim» are filled with the student's typed " +
-            "words automatically — skip them. Sending fewer than the rest is refused " +
-            "twice, then the unfilled ones print as '(not answered)' in the graded " +
-            "notebook.",
-        }),
-      ),
       note_markdown: Type.Optional(
         Type.String({
           description:
@@ -4496,231 +4372,33 @@ export default function (pi: ExtensionAPI) {
       // record twice ("about 20" — the figure 20 appears in neither the
       // typed follow-up nor the question) and then stamped a false quoting
       // warning on it in the submitted notebook.
+      // ── The student's answer is not written into the notebook ───────────
+      // It used to be. The instructor's skeleton carried «their answers,
+      // verbatim» and the extension filled it from the transcript — and that
+      // one feature is where nearly every fault in this file's history lived.
+      // Four withdrawn guards. A word list that deleted a real answer from a
+      // graded artifact, twice. Window edges, detour spans, filler words,
+      // rescue clauses, a fail-open cascade: all of it machinery for deciding
+      // WHICH of the student's messages to copy.
+      //
+      // It was also the fourth copy of the same words. A finished notebook
+      // already carries them uncurated in `session_record`, session_summary.md
+      // carries them again, and `student_said_verbatim` on the row below is
+      // the raw window — trustworthy precisely because nothing chooses. The
+      // note cell was the only copy that had to choose, and choosing was the
+      // bug.
+      //
+      // What survives here is about the LOG ROW, not the note: student_response
+      // is the model's headline for the record and is still held to the
+      // student's words.
       const pool = [...said, ...picked, String(params.question ?? "")];
-      const markers = slotMarkers(noteSkeleton(id));
-      // A «verbatim» slot is filled from the transcript, by the extension.
-      // Asking the model to pair answers with labelled slots failed five
-      // different ways across five rounds — dropped halves, a fragment
-      // instead of the answer, quotes shifted by one, punctuation tidied —
-      // and every deterministic guard that tried to catch it had to be
-      // withdrawn for refusing honest records. The words are right here.
-      // Their ANSWER, not the whole stream: asides they already got a
-      // souvenir for, and pure acknowledgement, are dropped — unless the
-      // message IS the answer the tutor logged, which rescues a one-word
-      // "right" that happens to look like filler.
-      // ── The other edge of the window ────────────────────────────────────
-      // `said` opens where the PREVIOUS checkpoint closed, which is not where
-      // this one began, so it also holds whatever they typed in the gap
-      // before this checkpoint's first question was ever put: a "yes ready!"
-      // to a pace question at a chapter close, a "hello? are you still
-      // there?" into a stalled terminal. Those were their words and they were
-      // not an answer to a question that did not yet exist, and a live m02
-      // session printed all three inside the note cells of cp2_distance and
-      // cp3_average as the student's worked answer.
-      //
-      // preQuestionCount narrows ONLY this — which of their messages the note
-      // CELL quotes. `said`, `pool`, student_said_verbatim, snapToTranscript,
-      // the said.length gates and the late-close count below are untouched,
-      // so nothing that already refuses a record can begin refusing a
-      // different set, and every word they typed is still on the graded row.
-      // note_skipped_msgs below already numbers what the note passed over.
-      const preAsk = preQuestionCount(ctx);
-      // The selection itself lives in lib/verbatim.ts, where a test can run
-      // it: which messages the note quotes, the boundary-drops-content-rescues
-      // asymmetry, and the fail-open cascade that gives both narrowings up
-      // rather than let the note fall through to the MODEL's wording.
-      // The "where is my notebook?" exchange, from the two facts in
-      // mechanicsAsked's note. Run here rather than at each turn because this
-      // is where the note is built and the whole branch is in hand.
-      markUrlAnsweredTurns(ctx);
-      const chosen = chooseQuotedWithFallback({
-        said,
-        response,
-        cut: preAsk,
-        detourSpans,
-        detourAsked,
-        mechanicsAsked,
-        dropDetours: true,
-      });
-      const noteCut = chosen.cutUsed;
-      const { keep: answerish, from: quotedFrom } = chosen;
-      const filledVerbatim = verbatimFill(answerish, response, { photoAnswered });
-      // The model is asked for the OTHER slots only — the ones whose answer
-      // was a drawing, a photo or a picker, which no transcript holds. It may
-      // still send a fill per slot positionally (older habit, and what the
-      // refusal below prints); both shapes are accepted.
-      // Accepted as an array, or as the JSON string a small model sends when
-      // it forgets the difference, or as one plain fill for a one-slot note.
-      const rawSlots = params.note_slots;
-      const slotList: unknown[] = Array.isArray(rawSlots)
-        ? rawSlots
-        : typeof rawSlots === "string" && rawSlots.trim()
-          ? (() => {
-              try {
-                const parsed = JSON.parse(rawSlots);
-                return Array.isArray(parsed) ? parsed : [rawSlots];
-              } catch {
-                return [rawSlots];
-              }
-            })()
-          : [];
-      const givenSlots = slotList.map((x: unknown) => String(x ?? ""));
-      const modelSlotIdx = markers
-        .map((m, i) => (/verbatim/i.test(m) ? -1 : i))
-        .filter((i) => i >= 0);
-      // Positional ONLY when the count matches the skeleton exactly. Anything
-      // else is read as compact — three entries on a two-marker skeleton used
-      // to make `modelFill(1)` read entry 2 while the model's real fill sat
-      // unread at entry 1, and the note rendered the wrong one silently.
-      const compactFills =
-        modelSlotIdx.length < markers.length && givenSlots.length !== markers.length;
-      const modelFill = (i: number) =>
-        compactFills ? (givenSlots[modelSlotIdx.indexOf(i)] ?? "") : (givenSlots[i] ?? "");
-      // A model-filled slot describes a picture, so its prose is the tutor's.
-      // Anything it puts in QUOTATION MARKS is still the student's, and a
-      // live run put three different spellings of one sentence into the
-      // record — student_response, the transcript capture, and a note cell
-      // reading "becuase tirangles are im[portat]", brackets and all. A quote
-      // that is a near-copy of something they typed is replaced with what
-      // they actually typed; a quote of three words or more that matches
-      // nothing they said is refused, like any other invented content.
-      // A model-filled slot describes a picture, so its prose is the tutor's.
-      // Anything it puts in QUOTATION MARKS is still the student's. The
-      // matching lives in lib/verbatim.ts (repairQuotes) so it can be run:
-      // a near-copy is replaced with what they actually typed, and a quote of
-      // three words or more that matches nothing they said is reported.
-      //
-      // The SAME pool the sibling drift check uses. Comparing against `said`
-      // alone accused a student of inventing their own picker answer — a
-      // choice never reaches the transcript — and that is the second time
-      // this file has learned it: two refusals mid-lesson, then a false
-      // "⚠ Quoting check" on the notebook they submit.
-      const quotesSnapped: string[] = [];
-      const quotesInvented: string[] = [];
-      const fixQuotes = (fill: string): string => {
-        const r = repairQuotes(fill, pool);
-        quotesSnapped.push(...r.snapped);
-        quotesInvented.push(...r.invented);
-        return r.text;
-      };
-      const filledSlots = markers.map((m, i) =>
-        /verbatim/i.test(m) ? filledVerbatim : fixQuotes(modelFill(i)),
-      );
       const problems: string[] = [];
-      // The two halves of the same finding, split by what they do to the
-      // record. `problems` is invention — a figure or a sentence the student
-      // never produced, attributed to them — which makes the row FALSE, so
-      // it is refused (twice, then logged with the flag). `notices` is a
-      // record that is true and merely less good; it goes straight onto the
-      // row and never stops a checkpoint closing. See REVIEWING.md.
-      const notices: string[] = [];
-      // Stand down on the STUDENT-derived half only. `pool` also carries the
-      // tutor's own question, which is never empty, so gating on it made this
-      // check fire on a photo checkpoint where the student had typed nothing
-      // — two refusals and a false "⚠ Quoting check" on the submitted
-      // notebook, for a slot whose whole job is describing a picture.
-      if ((said.length > 0 || picked.length > 0) && quotesInvented.length > 0) {
-        problems.push(
-          `these are in quotation marks in a note slot but the student never said them: ` +
-            quotesInvented.map((q) => `"${q}"`).join(", "),
-        );
-      }
-      // One fill per slot. The skeletons ask for a slot per part of the ask
-      // precisely so the keepsake quotes the ANSWER and not whichever
-      // fragment came last — under-filling turns that back into one sentence
-      // repeated under three labels.
-      // Numbers the student typed that reach no slot. RECORDED, not
-      // enforced — for the fourth time in this file, a guard that tried to
-      // decide which words belong in which slot had to be withdrawn.
-      // `said` holds every message since the last checkpoint (detour
-      // questions included, because log_detour peeks without consuming), so
-      // "they typed 6/7 and no slot quotes it" fires on a student who
-      // self-corrected to 7/6, on an aside asking "was that 1967?", on a
-      // follow-up echoing a number the reveal just gave them, and on a
-      // tutor who quoted 1.17 where they wrote 7/6. And the refusal told
-      // the tutor to put those into the graded note. So it goes in the log
-      // beside slot_sources, where a person can weigh it.
-      // Only where a slot could have quoted them. `note: none` checkpoints
-      // and `_extra` rounds have no skeleton, so every number the student
-      // typed was being listed as un-quoted against a note that does not
-      // exist.
-      const inFills = new Set(filledSlots.flatMap(slotTokens).filter(isFigure));
-      const figuresDropped = markers.length
-        ? [...new Set(answerish.flatMap(slotTokens).filter(isFigure))].filter(
-            (f) => !inFills.has(f),
-          )
-        : [];
-      const slotStrikes = slotDriftWarned.get(`${id}:slots`) ?? 0;
-      // No note_markdown exemption: the renderer ignores note_markdown
-      // whenever a skeleton exists, so taking that escape hatch discarded the
-      // tutor's note and printed "*(not answered)*" under slots the student
-      // had answered. Count NON-EMPTY fills — padding with "" satisfied a
-      // length check and produced the same placeholder.
-      // Only the slots the model fills. Demanding one for a «verbatim» slot
-      // refused an honest call over a string the renderer throws away.
-      const filled = modelSlotIdx.filter((i) => modelFill(i).trim()).length;
-      // Not gated on markers.length: a photo checkpoint's described slot IS
-      // the keepsake on that checkpoint, and omitting it rendered
-      // "> **My cable:** done, sent it" with no nudge at all.
-      //
-      // This one stays a REFUSAL, and it is worth saying why while the file
-      // is demoting its neighbours. An unfilled slot does not leave the note
-      // thinner; it prints "*(not answered)*" under a heading that says **My
-      // cable**, in a notebook the student hands in — a sentence asserting
-      // they did not answer a question they did answer. That is the record
-      // being false, not the record being less good.
-      if (
-        modelSlotIdx.length > 0 &&
-        filled < modelSlotIdx.length &&
-        slotStrikes < 2 &&
-        !refereeWaiverActive()
-      ) {
-        slotDriftWarned.set(`${id}:slots`, slotStrikes + 1);
-        return toResult({
-          out:
-            `NOT LOGGED — this checkpoint's note needs ${modelSlotIdx.length} fill` +
-            `${modelSlotIdx.length > 1 ? "s" : ""} from you and you sent ${filled}. Send note_slots ` +
-            `in this order, one entry each:\n` +
-            modelSlotIdx
-              .map(
-                (mi, n) =>
-                  `  ${n + 1}. ${(markers[mi] ?? "").replace(/[«»]/g, "").replace(/\s+/g, " ").trim()}`,
-              )
-              .join("\n") +
-            `\nThese are the parts no transcript holds — what the drawing shows, which ` +
-            `option they picked, the numbers a widget displayed. Their typed words are ` +
-            `quoted into the other slots for you. Then call checkpoint_done again.`,
-          failed: false,
-        });
-      }
-      // A skeleton that asks for the student's own words, on a checkpoint
-      // where the student never typed any, means the question that was
-      // supposed to get those words was skipped. cp1 is the case that
-      // showed it: answered entirely through the picker, its reveal asks
-      // one typed follow-up, and when the tutor jumped straight to
-      // checkpoint_done the slot fell back to student_response and the
-      // notebook read "**My guess:** about 60 — about 60".
-      //
-      // Photo and drawing checkpoints used to be exempt by construction:
-      // their slots carried no «verbatim» marker at all, because one slot was
-      // asked to describe the picture AND quote the reasoning in the same
-      // breath. That is the compound slot ops#15 caught — the tutor cannot
-      // follow "quote my reasoning word for word" when half the slot has to
-      // be described, and it rewrote the student's opening clause to make one
-      // fluent sentence. Those skeletons are split now (a described slot and
-      // a «verbatim» one), so the exemption has to be stated rather than
-      // implied: when the page IS the answer and it arrived, nothing typed is
-      // not a skipped question.
-      if (said.length === 0 && !photoAnswered && markers.some((m) => /verbatim/i.test(m))) {
-        problems.push(
-          `this checkpoint's note quotes the student's own words, but they have not ` +
-            `typed anything here yet — ask them the question your script's reveal_after ` +
-            `names, in plain text, and wait for their answer`,
-        );
-      }
-      // student_response is the headline quote of the graded record, so it
-      // gets the same treatment as a «verbatim» slot — plus a repair the
-      // slots do not need. A near-copy is snapped back to the transcript
+      // The mechanics marking still runs — the late-close gate and the ⚖️ nudge
+      // both ask how many times the student ANSWERED here, and "where is my
+      // notebook?" is not an answer.
+      markUrlAnsweredTurns(ctx);
+      // student_response is the headline quote of the graded record, so it is
+      // held to the transcript — plus a repair. A near-copy is snapped back
       // silently (the correction is recorded in the log, not paraded at the
       // student), and only real invention — a figure or three content words
       // they never produced — is bounced back to the model.
@@ -4729,11 +4407,10 @@ export default function (pi: ExtensionAPI) {
       // Two checkpoints in this course pin one: `(no answer — moved on)`, and
       // cp0_welcome's `(nothing was asked — the session opened straight into
       // the story)`, which its script pins BECAUSE the record's headline is
-      // the first thing a cold reader meets. The student still types
-      // something at cp0 — "hi", "start" — so the snap replaced the pinned
-      // literal with that word, and the graded record opened with
-      // "start" as the answer to "(nothing asked — the session just opened)".
-      // The script could not win against the repair; now it does not have to.
+      // the first thing a cold reader meets. The student still types something
+      // at cp0 — "hi", "start" — so the snap replaced the pinned literal with
+      // that word, and the graded record opened with "start" as the answer to
+      // "(nothing asked — the session just opened)".
       const stageDirection = /^\((?:nothing|no answer)\b/i.test(response.trim());
       if (said.length > 0 && !stageDirection) {
         const snapped = snapToTranscript(response, said);
@@ -4750,11 +4427,11 @@ export default function (pi: ExtensionAPI) {
         }
       }
       // When the answer came ONLY from a picker, student_response must be the
-      // option they actually chose. This is the one case the transcript can't
+      // option they actually chose. This is the one case the transcript cannot
       // police and the one a live run got backwards.
       if (said.length === 0 && picked.length > 0) {
-        const pool = new Set(picked.flatMap(slotTokens));
-        const shared = slotTokens(response).some((t) => pool.has(t) && !SLOT_GLUE.has(t));
+        const pickPool = new Set(picked.flatMap(slotTokens));
+        const shared = slotTokens(response).some((t) => pickPool.has(t) && !SLOT_GLUE.has(t));
         if (!shared) {
           problems.push(
             `student_response ("${response.slice(0, 80)}") does not match what they picked: ` +
@@ -4762,129 +4439,16 @@ export default function (pi: ExtensionAPI) {
           );
         }
       }
-      // Which message each «verbatim» slot appears to come from. RECORDED,
-      // not enforced.
-      //
-      // The failure worth catching is a fill set shifted by one, which drops
-      // the student's last answer from the keepsake. Two deterministic
-      // guards were tried and both had to be withdrawn, because the thing
-      // they must tell apart is not decidable without reading meaning:
-      //   - "the last slot holds their last message" refused every
-      //     checkpoint where the student's final message was a question or
-      //     "ok its uploaded" — and told the tutor to move that aside INTO
-      //     the graded slot;
-      //   - "no two slots quote the same message" refused every checkpoint
-      //     where the student answered two ask-steps in one breath and the
-      //     tutor correctly split that message in two — including the
-      //     module's own golden reference data.
-      // A shift and a legitimate split look identical to any string
-      // comparison. So the attribution goes in the log for a human to read,
-      // the instruction lives in AGENTS.md, and nothing here refuses a
-      // record on a guess.
-      // Which of their messages the note quotes, and which it passed over.
-      // (This used to be a per-slot best-bigram guess, from back when the
-      // model wrote the quotes and could shift them by one. The quotes are
-      // copied from the transcript now, so a guess would only mislead: what
-      // a grader still wants is what was LEFT OUT.)
-      const quotesMsgs = markers.some((m) => /verbatim/i.test(m)) ? quotedFrom : [];
-      const skippedMsgs = markers.some((m) => /verbatim/i.test(m))
-        ? said.map((_m, i) => i + 1).filter((n) => !quotedFrom.includes(n))
-        : [];
-      // A «verbatim» slot is filled from the transcript now, so the model's
-      // fill for it is never rendered — policing it refused twice over a
-      // string nobody reads and then stamped "⚠ Quoting check" on a note that
-      // was character-perfect. What IS still the model's wording is a slot
-      // that describes a picture, and that slot is only exempt while a
-      // picture exists: when no photo arrived the answer was typed, and a
-      // live run used the exemption to paraphrase a typed derivation.
-      for (const i of photoMissing ? modelSlotIdx : []) {
-        if (said.length === 0) break;
-        const fill = modelFill(i);
-        const d = slotDrift(fill, pool);
-        if (!driftIsReportable(d)) continue;
-        problems.push(
-          `note slot ${i + 1} ("${fill.slice(0, 80)}") adds ` +
-            [...d.numbers, ...d.words].map((t) => `"${t}"`).join(", "),
-        );
-      }
-
-      // A hand-written note is the one place words can be put in the
-      // student's mouth. Every other note cell is a skeleton whose «verbatim»
-      // slot the extension fills from the transcript — but a checkpoint with
-      // no skeleton (a practice round, a script with no `note:`) takes
-      // note_markdown, written by the model, blockquote and all. A live run
-      // wrote `> "P is 3, Q is 3, R is 2"` under "I worked out", while the log
-      // beside it held the student's three actual sentences. Nobody had said
-      // the quoted line. Same test as the slots, on the blockquote lines only:
-      // the prose above the fold is the tutor's own and is not checked.
-      if (!noteSuppressed(id) && !noteSkeleton(id) && said.length > 0) {
-        const quoted = String(params.note_markdown ?? "")
-          .split("\n")
-          .filter((l) => /^\s*>/.test(l))
-          .map((l) => l.replace(/^\s*>\s?/, ""))
-          .join(" ")
-          .trim();
-        if (quoted) {
-          const d = slotDrift(quoted, pool);
-          if (driftIsReportable(d)) {
-            problems.push(
-              `the quote in note_markdown ("${quoted.slice(0, 80)}") adds ` +
-                [...d.numbers, ...d.words].map((t) => `"${t}"`).join(", ") +
-                ` — quote their turns as they typed them, joined with " · "`,
-            );
-          }
-          // slotDrift only asks what the quote ADDS. It cannot see what the
-          // quote LEAVES OFF, and a practice round lost a student's reasoning
-          // that way: they typed "6 choose 2 is 15, and the outer friends each
-          // only have 1 friend so they cant center any" and the note quoted
-          // "6 choose 2 is 15" — the arithmetic kept, the thinking dropped, on
-          // a checkpoint whose whole point was the thinking.
-          //
-          // RECORDED, not refused, and that is the line this file now draws:
-          // a quote that ADDS words the student never said attributes a
-          // sentence to them, which makes the record false; a quote that
-          // stops early is accurate as far as it goes and merely less
-          // complete. This check refused a CORRECT quote twice within two
-          // hours of being written (fd45061, then 08a6620) for exactly the
-          // shape it cannot tell apart — a student elaborating on their own
-          // earlier message. It now says so on the row instead, beside
-          // note_skipped_msgs, which already numbers what the note passed
-          // over. lib/verbatim.ts holds the comparison, with both shapes
-          // under test.
-          const cutShort = truncatedQuote(quoted, said);
-          if (cutShort) {
-            notices.push(
-              `the quote "${cutShort.segment.slice(0, 60)}…" stops partway through what ` +
-                `they typed — they went on "…${cutShort.rest.slice(0, 60)}"`,
-            );
-          }
-        }
-      }
-
       // Two refusals per checkpoint, then it logs anyway with the drift
       // flagged for the grader: a model that cannot satisfy the check must
       // never be able to strand the student mid-lesson.
       const strikes = slotDriftWarned.get(id) ?? 0;
-      if (problems.length > 0 && strikes < 2 && said.length === 0 && !refereeWaiverActive()) {
-        slotDriftWarned.set(id, strikes + 1);
-        return toResult({
-          out:
-            `NOT LOGGED — ${problems.join("; ")}.\n` +
-            `Do not write that line for them and do not call checkpoint_done again ` +
-            `until they have answered. SAY THE QUESTION OUT LOUD in plain text — never ` +
-            `end this turn without speaking, a silent turn is a frozen screen — then ` +
-            `wait, and log what they type.`,
-          failed: false,
-        });
-      }
       if (problems.length > 0 && strikes < 2 && !refereeWaiverActive()) {
         slotDriftWarned.set(id, strikes + 1);
         return toResult({
           out:
-            `NOT LOGGED — student_response and every note slot quoting them are the ` +
-            `student's own words (a photo slot too, when no photo arrived and the answer ` +
-            `was typed), and these are not in anything they said: ` +
-            `${problems.join("; ")}.\n` +
+            `NOT LOGGED — student_response is the student's own words, and this is not in ` +
+            `anything they said: ${problems.join("; ")}.\n` +
             `What they actually typed: ${said.map((s) => `"${s}"`).join(", ")}.\n` +
             `Quote them, don't polish — no figure they didn't give, no sentence built out ` +
             `of your own summary. Your reading of a drawing, or a number a widget showed, ` +
@@ -5122,24 +4686,13 @@ export default function (pi: ExtensionAPI) {
         // Which id the model actually sent, when it was not the script's.
         ...(snapped.snappedFrom ? { id_snapped_from: snapped.snappedFrom } : {}),
         ...(appealRuling ? { closed_by_referee: appealRuling } : {}),
-        ...(quotesSnapped.length ? { slot_quotes_repaired: quotesSnapped } : {}),
-        ...(quotesMsgs.length ? { note_quotes_msgs: quotesMsgs } : {}),
-        ...(skippedMsgs.length ? { note_skipped_msgs: skippedMsgs } : {}),
-        // Where this checkpoint's own questioning starts in `said`. Anything
-        // before it was typed before there was a question here, and is
-        // SKIPPED by the note, never deleted: it is still in
-        // student_said_verbatim above and note_skipped_msgs already numbers
-        // it. RECORDED, not enforced — a grader who wonders why message 1 is
-        // not in the note should not have to guess whether a filter or the
-        // timeline did it.
-        ...(noteCut > 0 ? { note_window_from_msg: noteCut + 1 } : {}),
-        ...(figuresDropped.length ? { figures_not_quoted: figuresDropped } : {}),
+        // Invention in student_response — a figure or three content words the
+        // student never produced — after two refusals. The other fields that
+        // used to sit here (note_quotes_msgs, note_skipped_msgs,
+        // note_window_from_msg, slot_quotes_repaired, note_quotes_short,
+        // figures_not_quoted) all described which of their messages the NOTE
+        // CELL had copied, and there is no such copy any more.
         ...(problems.length > 0 ? { verbatim_drift: problems } : {}),
-        // The record is true and less good. Deliberately NOT verbatim_drift:
-        // buildSessionRecord prints "⚠ Quoting check" into the notebook the
-        // STUDENT submits off that field, and a warning on their keepsake is
-        // not the right answer to a quote that was accurate but short.
-        ...(notices.length > 0 ? { note_quotes_short: notices } : {}),
       });
 
       const suppressed = noteSuppressed(id);
@@ -5147,7 +4700,7 @@ export default function (pi: ExtensionAPI) {
       const md = suppressed
         ? ""
         : skeleton
-          ? fillSlots(skeleton, filledSlots, markers.length === 1 ? response : "")
+          ? renderNoteSkeleton(skeleton)
           : String(params.note_markdown ?? "").trim();
       let noteLine: string;
       if (suppressed) {

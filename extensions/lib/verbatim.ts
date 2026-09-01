@@ -189,110 +189,12 @@ export function slotDrift(
 export const driftIsReportable = (d: { numbers: string[]; words: string[] }): boolean =>
   d.numbers.length > 0 || d.words.length >= 3;
 
-// ---------------------------------------------------------------------------
-// Choosing what the note cell quotes
-// ---------------------------------------------------------------------------
 
-export interface QuoteWindow {
-  /** Every message the student typed since the last checkpoint closed. */
-  said: string[];
-  /** The answer the model logged, used only to RESCUE a message. */
-  response: string;
-  /** How many of `said` were typed before the tutor first spoke here. */
-  cut: number;
-  /** [first,last] index spans of `said` that belong to a detour. */
-  detourSpans: [number, number][];
-  /** Normalised text of questions already recorded as detours. */
-  detourAsked: Set<string>;
-  /**
-   * Normalised text of messages that were about the SESSION, not the lesson —
-   * "which notebook do you mean?", "i did not see the browser open".
-   *
-   * A live run put two of those into cp1_bridges' note cell under "My guess,
-   * and how far I got", between the student's prediction and their real
-   * answer. They are not filler (they are sentences), not a detour (nothing
-   * called log_detour), and not pre-question (they came after the tutor
-   * spoke), so every existing narrowing kept them.
-   *
-   * Filled from FACTS, never from a word list over the student's words: the
-   * message that made the toolkit run nb_notebook_url, and any message whose
-   * reply carried the notebook's address. See pi-pair-notebook#12.
-   */
-  mechanicsAsked?: Set<string>;
-  dropDetours: boolean;
-}
 
-/**
- * Which of the student's messages the note cell quotes, and their 1-based
- * positions in `said`.
- *
- * The BOUNDARY decides what to drop; content may only ever RESCUE. That
- * asymmetry is the whole difference between this and growing ACK_WORDS,
- * which has twice deleted real answers from a graded artifact: a word list
- * decides on its own and gets "yes" wrong, while nothing is dropped here
- * that the timeline had not already placed before the tutor spoke — and a
- * figure, or the very message the tutor logged as the answer, pulls it
- * straight back in. A student who volunteers the answer before being asked
- * keeps it.
- */
-export function chooseQuoted(w: QuoteWindow): { keep: string[]; from: number[] } {
-  const from: number[] = [];
-  const keep = w.said.filter((m, i) => {
-    const isResponse = normMsg(m) === normMsg(w.response) || bigramDice(m, w.response) >= 0.6;
-    // Inside a detour the student was answering the tutor's aside, not this
-    // checkpoint. detourAsked already drops their question; this drops the
-    // rest of the exchange around it.
-    const inDetour = w.dropDetours && w.detourSpans.some(([a, b]) => i >= a && i <= b);
-    const elsewhere = (i < w.cut || inDetour) && !isResponse && !slotTokens(m).some(isFigure);
-    const k =
-      isResponse ||
-      (!elsewhere &&
-        !w.detourAsked.has(normMsg(m)) &&
-        !w.mechanicsAsked?.has(normMsg(m)) &&
-        !isFillerMessage(m));
-    if (k) from.push(i + 1);
-    return k;
-  });
-  return { keep, from };
-}
-
-/**
- * The same three-step fail-open cascade the note cell has always used, in
- * one place so it can be run.
- *
- * If a narrowing leaves the note with nothing of theirs to quote, the caller
- * falls back to the MODEL's wording — which is what every check in this file
- * exists to prevent. So both narrowings give way, the newest one first,
- * before that can happen. Quote too much instead.
- */
-export function chooseQuotedWithFallback(
-  w: QuoteWindow,
-): { keep: string[]; from: number[]; cutUsed: number; detoursDropped: boolean } {
-  let chosen = chooseQuoted({ ...w, dropDetours: true });
-  if (chosen.keep.length) return { ...chosen, cutUsed: w.cut, detoursDropped: true };
-  if (w.cut > 0) {
-    chosen = chooseQuoted({ ...w, cut: 0, dropDetours: true });
-    if (chosen.keep.length) return { ...chosen, cutUsed: 0, detoursDropped: true };
-  }
-  if (w.detourSpans.length) {
-    chosen = chooseQuoted({ ...w, dropDetours: false });
-    if (chosen.keep.length) return { ...chosen, cutUsed: w.cut, detoursDropped: false };
-  }
-  // And the newest narrowing gives way last. mechanicsAsked is the most
-  // precise of the three — it is filled from two facts rather than from a
-  // guess about wording — so it is the one to hold on to longest; but "the
-  // note falls through to the MODEL's wording" is worse than any of them, so
-  // it gives way too rather than let that happen.
-  if (w.mechanicsAsked?.size) {
-    chosen = chooseQuoted({ ...w, mechanicsAsked: undefined, dropDetours: false });
-    if (chosen.keep.length) return { ...chosen, cutUsed: w.cut, detoursDropped: false };
-  }
-  return { ...chosen, cutUsed: w.cut, detoursDropped: false };
-}
 
 /**
  * How many of this checkpoint's messages are ANSWERS to it — the number the
- * late-close gate compares against the script's question count.
+ * late-close gate and the ⚖️ nudge compare against.
  *
  * It used to be `said.length`, the raw window, and a student who asked one
  * question mid-checkpoint tripped a refusal whose prescribed remedy was to
@@ -301,25 +203,117 @@ export function chooseQuotedWithFallback(
  * detour in between. A curious student is the one this module wants, and the
  * gate degraded their record for it.
  *
- * The SAME narrowing the note cell uses, from the same function, so the two
- * can never disagree again about what counts as an answer here — that
- * disagreement is how the bug existed at all. `cut` is deliberately 0: the
- * pre-question narrowing must NOT be applied. Messages typed before this
- * checkpoint's first question are the PREVIOUS checkpoint's tail sitting in a
- * window nobody reset, which is not noise around a late close — it IS the late
- * close, the founding case this gate was built for.
+ * Three things are not answers, and all three are marked from FACTS rather
+ * than from any reading of the student's words:
+ *   · a detour's turns — the span runs from their question to log_detour;
+ *   · a message already recorded as a detour question;
+ *   · the "where is my notebook?" exchange (see mechanicsAsked);
+ * plus pure acknowledgement, which is the one word-list left and the one with
+ * a scar record — see ACK_WORDS.
+ *
+ * This used to run through `chooseQuoted`, because the note cell needed the
+ * same narrowing and the two must not disagree. The note cell no longer quotes
+ * the student at all, so this is the only caller left and it says what it does
+ * directly. `isResponse` is gone with it: the rescue existed so a curated quote
+ * could not lose a real answer, and there is no curated quote any more.
  *
  * Subtracting can only ever turn a refusal OFF, never on, which is the one
  * direction this file's history of withdrawn guards allows a count to move.
  */
 export function answerCountForGate(w: {
   said: string[];
-  response: string;
   detourSpans: [number, number][];
   detourAsked: Set<string>;
   mechanicsAsked?: Set<string>;
 }): number {
-  return chooseQuoted({ ...w, cut: 0, dropDetours: true }).keep.length;
+  return w.said.filter((m, i) => {
+    if (w.detourSpans.some(([a, b]) => i >= a && i <= b)) return false;
+    const n = normMsg(m);
+    if (w.detourAsked.has(n) || w.mechanicsAsked?.has(n)) return false;
+    return !isFillerMessage(m);
+  }).length;
+}
+
+/**
+ * A note skeleton with its «slots» taken out, ready to render as it stands.
+ *
+ * The note cell used to quote the student: the instructor's skeleton carried
+ * «their answers, verbatim» and the extension filled it from the transcript.
+ * That one feature is where nearly every fault in this file's history lived —
+ * four withdrawn guards, two occasions on which a word list deleted a real
+ * answer from a graded artifact, and the whole apparatus of window edges,
+ * detour spans, filler words and rescue clauses that existed to decide WHICH
+ * of the student's messages to copy.
+ *
+ * It was also the fourth copy. A finished notebook already carries their words
+ * uncurated in the `session_record` cell, `session_summary.md` carries them
+ * again, and `session_log.jsonl` holds the raw window in
+ * `student_said_verbatim` — which is trustworthy precisely because nothing
+ * chooses. The note cell was the only copy that had to choose, and choosing
+ * was the bug.
+ *
+ * So the note cell is the instructor's prose now, and nothing else.
+ *
+ * THIS FUNCTION IS THE COMPATIBILITY LAYER, and it is why it is not simply
+ * `skeleton`. A module whose lesson YAML still carries the slots must not
+ * render `«their answers, verbatim»` into a student's notebook — the toolkit
+ * ships before the modules are edited, and a student on the new toolkit and an
+ * old module is the normal state for a while. A `details` block that holds
+ * nothing but slots goes with them: an empty fold titled "My guess, and how
+ * far I got" is worse than no fold.
+ */
+const SLOT_MARKER = /«[^»]*»/g;
+
+export function renderNoteSkeleton(skeleton: string): string {
+  const lines = skeleton.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*\/\/\/\s*details\b/.test(lines[i])) {
+      out.push(lines[i]);
+      continue;
+    }
+    // Collect the block: `/// details | title` … `///`
+    let end = i + 1;
+    while (end < lines.length && !/^\s*\/\/\/\s*$/.test(lines[end])) end += 1;
+    const body = lines.slice(i + 1, end);
+    // JOINED before the slots are stripped, never line by line. A slot's
+    // instruction to the model runs to several lines —
+    //     > «what my photo of the table shows, written as mine —
+    //       "I listed all ten pairs and got…". A photographed answer never
+    //       reaches the transcript, so this slot is yours to describe»
+    // — and `«[^»]*»` matches that only across the whole block. Tested per
+    // line it matches nothing, the fold reads as prose, and three of this
+    // course's own skeletons kept an empty "My work" fold in the student's
+    // notebook.
+    const joined = body.join("\n");
+    const stripped = joined.replace(SLOT_MARKER, "");
+    // `type: lh-answer` and friends are the fold's own attributes, not content.
+    const content = stripped.split("\n").filter((l) => l.trim() && !/^\s*\w[\w-]*:\s/.test(l));
+    // What is left once the slots go has to be WORDS to count as content, and
+    // three things do not count:
+    //   · punctuation the instructor put BETWEEN two slots — the real skeleton
+    //     is `> «their pick» — «their report, verbatim»`, whose residue is a
+    //     blockquote arrow and a dash;
+    //   · a bare label like `**On paper:**`, which titles an answer that is no
+    //     longer there (cp2_paperwork and cp4_shortcut_drawing both do this);
+    //   · nothing at all — cp4_disconnected's fold is one slot and no prose.
+    // All three leave a fold with a heading and an empty inside, which is
+    // worse for the student than no fold.
+    const hadSlot = stripped !== joined;
+    const survives = content.filter((l) =>
+      /[\p{L}\p{N}]/u.test(l.replace(/\*\*[^*]*:\*\*/g, "")),
+    );
+    const onlySlots = hadSlot && survives.length === 0;
+    if (!onlySlots) out.push(...lines.slice(i, Math.min(end + 1, lines.length)));
+    i = end;
+  }
+  return out
+    .join("\n")
+    .replace(SLOT_MARKER, "")
+    // A slot on its own line leaves a blank; two blanks in a row read as a
+    // paragraph break the instructor did not write.
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -340,113 +334,22 @@ export function answerCountForGate(w: {
  */
 export const STUCK_ANSWERS = 6;
 
-/**
- * A model-filled slot describes a picture, so its prose is the tutor's.
- * Anything it puts in QUOTATION MARKS is still the student's, and a live run
- * put three different spellings of one sentence into the record —
- * student_response, the transcript capture, and a note cell reading
- * "becuase tirangles are im[portat]", brackets and all. A quote that is a
- * near-copy of something they typed is replaced with what they actually
- * typed; a quote of three words or more that matches nothing they said is
- * reported.
- */
-export function repairQuotes(
-  fill: string,
-  pool: string[],
-): { text: string; snapped: string[]; invented: string[] } {
-  const snapped: string[] = [];
-  const invented: string[] = [];
-  const text = fill.replace(/[“"]([^”"]{4,})[”"]/g, (whole, inner: string) => {
-    const t = inner.trim();
-    let best = "";
-    let score = 0;
-    for (const msg of pool) {
-      const d = bigramDice(t, msg);
-      if (d > score) {
-        score = d;
-        best = msg;
-      }
-    }
-    if (score >= 0.8 && best && normMsg(best) !== normMsg(t)) {
-      snapped.push(t);
-      return `“${best}”`;
-    }
-    // Short quotes are labels and readings ("2.07", "long"), not speech.
-    if (score < 0.5 && t.split(/\s+/).filter(Boolean).length >= 3) invented.push(t);
-    return whole;
-  });
-  return { text, snapped, invented };
-}
 
-/**
- * A quote that stops partway through what the student typed.
- *
- * slotDrift only asks what a quote ADDS. It cannot see what the quote LEAVES
- * OFF, and a practice round lost a student's reasoning that way: they typed
- * "6 choose 2 is 15, and the outer friends each only have 1 friend so they
- * cant center any" and the note quoted "6 choose 2 is 15" — the arithmetic
- * kept, the thinking dropped, on a checkpoint whose whole point was the
- * thinking. Nothing was added, so nothing fired.
- *
- * Returns the offending segment and what was dropped, or null.
- */
-export function truncatedQuote(
-  quoted: string,
-  said: string[],
-  minDropped = 4,
-): { segment: string; rest: string } | null {
-  for (const seg of quoted.split("·").map((s) => s.trim().replace(/^"|"$/g, ""))) {
-    const segN = normMsg(seg);
-    if (segN.split(" ").filter(Boolean).length < 2) continue;
-    // A quote that IS one of their messages is right by definition, even when
-    // a later one opens with the same words. Students elaborate: "i think its
-    // 2", then "i think its 2 because they are neighbours on the ring".
-    // Without this, quoting the first one exactly and correctly is reported
-    // as a truncation of the second.
-    if (said.some((m) => normMsg(m) === segN)) continue;
-    const whole = said.find((m) => {
-      const mN = normMsg(m);
-      return mN.startsWith(segN) && mN.length > segN.length;
-    });
-    if (!whole) continue;
-    const dropped = normMsg(whole).split(" ").length - segN.split(" ").length;
-    if (dropped >= minDropped) {
-      return { segment: seg, rest: normMsg(whole).slice(segN.length).trim() };
-    }
-  }
-  return null;
-}
 
 // ---------------------------------------------------------------------------
-// Rendering
+// The souvenir's quote — the one place the student's own words are still
+// written INTO the notebook by this file. Their answers are not: those live in
+// session_log.jsonl, in session_summary.md and in the session_record cell,
+// none of which has to choose which message to copy. Their QUESTION is
+// different — a souvenir is built because they asked something, so the
+// question is the cell's subject rather than a record of their work.
 // ---------------------------------------------------------------------------
-
-export function fillSlots(skeleton: string, slots: string[], fallback: string): string {
-  let i = 0;
-  let usedFallback = false;
-  return skeleton.replace(/«[^»]*»/g, () => {
-    const supplied = slots[i];
-    i += 1;
-    // `.trim()`, matching the slot-count guard: a whitespace pad satisfied
-    // neither, and rendered as a heading with nothing under it.
-    if (supplied !== undefined && supplied.trim() !== "") return supplied;
-    // The fallback is for a ONE-slot skeleton. On a skeleton whose other slot
-    // already quotes the student, using it again printed their sentence twice
-    // in one line: "**My guess:** way off, i said 20 — "way off, i said 20"".
-    if (!fallback.trim() || usedFallback) return "*(not answered)*";
-    usedFallback = true;
-    return fallback;
-  });
-}
-
-/** The «slot» markers in a note skeleton, in order. */
-export const slotMarkers = (skeleton: string): string[] => skeleton.match(/«[^»]*»/g) ?? [];
 
 /**
  * A souvenir cell opens with the student's own question, quoted. Every live
  * session so far produced detour cells that answered a question the notebook
- * never states — unreadable months later, and the personalization is the
- * whole point of a souvenir.
+ * never states, so a reader — the student, next month — cannot tell what the
+ * cell is for.
  */
 export function withQuotedQuestion(
   markdown: string,
@@ -1027,36 +930,6 @@ export function scriptedQuestionCount(askBlock: string): number {
   return (askBlock.match(/^\s*\d+[a-z]?\.\s/gm) ?? []).length;
 }
 
-/**
- * What a «verbatim» slot renders when the student typed nothing at all.
- *
- * Normally that cannot happen: a skeleton only asks for their words where a
- * question was put to them, and `checkpoint_done` refuses a close that quotes
- * words nobody typed. The exception is a paper checkpoint whose PHOTO
- * arrived — the page was the answer, and refusing there would be refusing an
- * honest record.
- *
- * The fallback used to be `student_response` in every case, and on that one
- * path it put the model's own stage direction inside a fold labelled as the
- * student's words. From a gate run on 2026-08-27, in cp2_paperwork's "My
- * work":
- *
- *     > (photo of hand-worked table: 5-ring, all 10 pairs, sum 15, average 1.5)
- *
- * Nobody said that. It is a sentence the model wrote for the log's headline
- * field, and the row still carries it there, where it belongs. What the fold
- * says now is what actually happened.
- */
-export function verbatimFill(
-  answerish: string[],
-  response: string,
-  opts: { photoAnswered?: boolean } = {},
-): string {
-  if (answerish.length) {
-    return answerish.map((m) => `"${m.replace(/\n+/g, " ").trim()}"`).join(" · ");
-  }
-  return opts.photoAnswered ? "*(answered on paper — the photo is above)*" : response;
-}
 
 // ---------------------------------------------------------------------------
 // Where the notebook is
