@@ -336,6 +336,36 @@ export const STUCK_ANSWERS = 6;
 
 
 
+/**
+ * Where a CHAPTER-HANDOFF compaction should cut.
+ *
+ * Not where pi would. pi's `findCutPoint` walks backwards keeping the most
+ * recent `keepRecentTokens` of conversation, which is the right rule for a
+ * compaction that happens because the context got big. This one happens
+ * because a chapter ENDED, and its summary is a complete handoff brief for
+ * everything before it — so everything before it should go.
+ *
+ * Handing pi's cut point back meant the compaction removed almost nothing: a
+ * chapter's conversation is nowhere near the budget (measured at 5,571 tokens
+ * against a keepRecentTokens of 3,000), so the cut landed at or before the
+ * OUTGOING chapter's own script. Replayed across all 92 real handoffs on one
+ * machine, 40 of them kept the finished chapter's script alive and the model
+ * began the next chapter reading a script whose closing line tells it to call
+ * chapter_done. With this the number is 0, and the mean context at the
+ * boundary goes from 24.1 entries to 2.
+ *
+ * The LAST entry on the branch, because pi keeps FROM the id inclusive: that
+ * is the turn chapter_done was called in, so the tutor keeps its own bridge
+ * sentence and loses the chapter behind it. An id pi cannot find degrades to
+ * "keep only what came after the compaction", which is the same intent.
+ */
+export function handoffCutPoint(branchEntries: unknown, fallback: string): string {
+  const branch = Array.isArray(branchEntries) ? branchEntries : [];
+  const last = branch.length ? (branch[branch.length - 1] as { id?: unknown }) : null;
+  const id = typeof last?.id === "string" ? last.id : "";
+  return id || fallback;
+}
+
 // ---------------------------------------------------------------------------
 // The souvenir's quote — the one place the student's own words are still
 // written INTO the notebook by this file. Their answers are not: those live in

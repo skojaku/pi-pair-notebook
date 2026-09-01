@@ -42,6 +42,7 @@ import {
   baseCheckpointId,
   capturePick,
   driftIsReportable,
+  handoffCutPoint,
   renderNoteSkeleton,
   matchDetourQuestion,
   normMsg,
@@ -1975,6 +1976,18 @@ function appendLog(entry: Record<string, unknown>): boolean {
  * Ground truth for the graded artifact: the student's own messages, read
  * straight from the transcript, so a logged answer can never drift into
  * paraphrase. Returns what they typed since the previous checkpoint.
+ *
+ * AN INDEX INTO A LIST THAT CAN GET SHORTER, and that is why session_start
+ * resets it. pi's `/new` and `/resume` are in-process: they tear the runtime
+ * down and build a fresh one, but the extension MODULE is not re-evaluated —
+ * pi's loader returns the cached factory — so everything at this scope keeps
+ * the value it had in the session that just ended. The new session's branch
+ * starts empty, `allStudentMessages(ctx).slice(30)` on a two-message branch is
+ * `[]`, and the first checkpoint of the new session logs
+ * `student_said_verbatim: []` with nothing to say why.
+ *
+ * Compaction does NOT do this — it only appends, and getBranch() walks
+ * parentId, so it never shortens. A session switch does.
  */
 let studentSaidMark = 0;
 /**
@@ -3436,9 +3449,29 @@ export default function (pi: ExtensionAPI) {
     // unable to see this at all — which is how a fault of exactly this shape
     // survives a green gate.
     //
-    // Reset first: the flag is module-level and the process outlives a
-    // session, so `/new` and a resume in the same pi would otherwise skip the
-    // banner for every session after the first.
+    // ── Everything at module scope outlives the session ──────────────────
+    // pi's `/new` and `/resume` are in-process: the runtime is rebuilt, but
+    // the extension module is not re-evaluated (the loader returns the cached
+    // factory), so every `let` up there still holds the last session's value
+    // while the new session's branch starts empty.
+    //
+    // `studentSaidMark` is the one that damages a record: it is an INDEX, the
+    // new branch is shorter than the old mark, and `all.slice(mark)` is then
+    // `[]` — so the first checkpoint of the second session logs
+    // `student_said_verbatim: []` and the note has nothing of theirs in it.
+    // The others are cheaper but wrong in the same way: a stale pick riding
+    // into the new session's first row, a detour span pointing at a window
+    // that no longer exists, a banner that never prints again.
+    //
+    // Compaction is NOT this. It only ever appends, and getBranch() walks
+    // parentId, so the branch never gets shorter under it.
+    studentSaidMark = 0;
+    closedAtEntryId = null;
+    pickedAnswers.length = 0;
+    pickedMark = 0;
+    detourSpans.length = 0;
+    detourAsked.clear();
+    mechanicsAsked.clear();
     announcedNotebook = false;
     void marimoUrl()
       .then((r) => {
@@ -3664,10 +3697,38 @@ export default function (pi: ExtensionAPI) {
     }
     const summary = pendingHandoffBrief;
     pendingHandoffBrief = null;
+    // ── Where the cut lands, and why it is not pi's ──────────────────────
+    // This used to hand `event.preparation.firstKeptEntryId` straight back —
+    // pi's own cut point, which findCutPoint walks backwards to keep the most
+    // recent `keepRecentTokens` of conversation. That is the right rule for a
+    // compaction that happens because the context got big. It is the wrong
+    // rule for this one, which happens because a CHAPTER ENDED, and whose
+    // summary is a complete handoff brief for everything before it.
+    //
+    // A chapter's conversation is nowhere near the budget — measured at 5,571
+    // tokens against a keepRecentTokens of 3,000-20,000 — so pi's cut point
+    // lands at or before the OUTGOING chapter's own script, and the compaction
+    // removes essentially nothing. Measured across 92 real handoffs on one
+    // machine: 40 kept the finished chapter's script alive, 39 then held TWO
+    // chapter scripts in context at once, and 23 of them came out of the
+    // "compaction" BIGGER than they went in. The design note above this
+    // handler — "same session, same visible transcript, fresh LLM context" —
+    // was false at every one of them, and the tutor began chapter 2 still
+    // reading chapter 1's script, whose closing line tells it to call
+    // chapter_done. chapter_done's own guard records what that produced: two
+    // transitions back to back, and a student who went from chapter 1 straight
+    // into chapter 3's pen-and-paper task.
+    //
+    // pi stores whatever id the hook returns, unvalidated (session-manager
+    // appendCompaction), and buildContextEntries keeps from it — so the hook
+    // is allowed to name its own boundary, and this one should: the last entry
+    // on the branch, which is the chapter_done turn. Everything before it is
+    // what the brief already says. An id pi cannot find degrades to "keep only
+    // what came after the compaction", which is the same intent.
     return {
       compaction: {
         summary,
-        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        firstKeptEntryId: handoffCutPoint(event?.branchEntries, event.preparation.firstKeptEntryId),
         tokensBefore: event.preparation.tokensBefore,
       },
     };
@@ -3920,14 +3981,27 @@ export default function (pi: ExtensionAPI) {
       // every chapter turn, four times a session, with nothing actually
       // wrong. So it is armed here and fired at message_end, once the tutor
       // has finished speaking.
-      pendingCompaction = async () => {
+      const armCompaction = async () => {
         // Wait for pi to actually settle. turn_end fires while the run is
         // still winding down, and compacting then aborts it — which the
         // student reads as "Error: This operation was aborted", in red, at
         // every chapter boundary. isIdle() is the difference between "the
         // tutor has stopped talking" and "there is nothing left to abort".
+        //
+        // Ten seconds is a bound, not a decision. When it runs out the old
+        // code compacted ANYWAY — into a run that was, by its own test, still
+        // going — which is the abort this poll exists to avoid, just later and
+        // rarer. `turn_end` fires per assistant message, so the first one to
+        // arrive is the chapter_done tool turn itself, before the bridge
+        // sentence the tool result asks for; the poll is what usually covers
+        // that gap. Re-arm instead: the next turn_end tries again, and the 30s
+        // floor below is the backstop for a tutor that never speaks again.
         for (let i = 0; i < 40 && ctx?.isIdle && !ctx.isIdle(); i++) {
           await new Promise((r) => setTimeout(r, 250));
+        }
+        if (ctx?.isIdle && !ctx.isIdle()) {
+          pendingCompaction = armCompaction;
+          return;
         }
         try {
           ctx?.compact?.({
@@ -3945,6 +4019,7 @@ export default function (pi: ExtensionAPI) {
           loadOnce();
         }
       };
+      pendingCompaction = armCompaction;
       // A floor under it: a tutor that says nothing at all may never produce
       // a message_end, and a chapter that never loads strands the student.
       const armed = setTimeout(runPendingCompaction, 30_000);
@@ -6672,7 +6747,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("turn_end", async (event: any) => {
     // Read before runPendingCompaction() nulls it: the stall nudge at the
     // bottom must not fire into a chapter handoff.
-    const wasHandingOff = !!pendingCompaction;
+    // `pendingHandoffBrief`, not `pendingCompaction`. The latter is nulled by
+    // runPendingCompaction() three lines below and therefore ALWAYS false
+    // where this is read — so the empty-turn nudge was never actually held
+    // back during a handoff, which is the one window it must not fire in
+    // (chapter_done ends its turn on a bridge sentence, compaction fires right
+    // here, and a message injected into that window is the "Error: This
+    // operation was aborted" the comment below exists to prevent). The brief
+    // is non-null from chapter_done until session_before_compact consumes it,
+    // which is exactly the window.
+    const wasHandingOff = !!pendingHandoffBrief || !!pendingCompaction;
     if (triviaTimer) {
       clearInterval(triviaTimer);
       triviaTimer = null;

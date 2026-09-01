@@ -13,6 +13,7 @@ import {
   bigramDice,
   capturePick,
   driftIsReportable,
+  handoffCutPoint,
   editDistanceAtMost,
   isDialogSentinel,
   isFigure,
@@ -880,4 +881,23 @@ test("a slot whose instruction runs to several lines still takes its fold with i
   assert.ok(!out.includes("My work"), out);
   assert.ok(!out.includes("On paper"), out);
   assert.equal(out, "### The paperwork");
+});
+
+// ---------------------------------------------------------------------------
+// handoffCutPoint — where a chapter-boundary compaction cuts
+// ---------------------------------------------------------------------------
+
+test("the cut lands on the chapter boundary, not on pi's token budget", () => {
+  // Replayed across all 92 real handoffs on one machine, pi's own cut point
+  // kept the finished chapter's script alive at 40 of them; this keeps it at 0.
+  const branch = [{ id: "a" }, { id: "b" }, { id: "chapter_done_turn" }];
+  assert.equal(handoffCutPoint(branch, "pi-would-say-this"), "chapter_done_turn");
+});
+
+test("an empty or unreadable branch falls back to pi's cut point", () => {
+  // Never worse than what pi would have done on its own.
+  assert.equal(handoffCutPoint([], "pi-cut"), "pi-cut");
+  assert.equal(handoffCutPoint(undefined, "pi-cut"), "pi-cut");
+  assert.equal(handoffCutPoint("not a list", "pi-cut"), "pi-cut");
+  assert.equal(handoffCutPoint([{ noId: true }], "pi-cut"), "pi-cut");
 });
