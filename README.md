@@ -14,6 +14,11 @@ package supplies the tools that operate on them. See
 [`sk-classroom/advnetsci-pair-notebook-m02-small-world`](https://github.com/sk-classroom/advnetsci-pair-notebook-m02-small-world)
 for a complete module.
 
+Drop the lesson and the same tools make a **pair agent** for a team working in
+their own notebook — a mini-project, where nothing is tutored and the notebook
+is the assignment. One file decides which of the two a folder is; see
+[The other shape](#the-other-shape-a-mini-project).
+
 ## What is in here
 
 This repository is the software, and only the software. The teaching material
@@ -214,11 +219,45 @@ self-describing.** `nb_add_template` returns the `# describe:` line and the
 tutor is told to describe the artifact *only* from it — a tutor once called a
 4-person network "5-person" because it was guessing.
 
+## The other shape: a mini-project
+
+A tutored module is one student, one lesson, one `notebook.py`. A
+**mini-project** is a team of three in a Classroom repository whose notebook is
+the assignment itself — no lesson, no checkpoints, nothing graded on how the
+conversation went. The same toolkit is worth as much there: an agent that edits
+the *live* notebook is the difference between a team watching their idea run
+and a team told to re-run a file somebody changed behind their back.
+
+**There is no mode to set.** A folder either has `lesson/index.json` in it or
+it does not, and that one file decides:
+
+| | tutored module | mini-project |
+|---|---|---|
+| the notebook | `notebook.py`, from the template | whatever the repository ships (below) |
+| `bash` | taken away — a shell scrolls past a lesson | left on: it is a git repository and the team has to commit in it |
+| `nb_add_cell`, `nb_edit_cell`, `nb_delete_cell`, `nb_read`, `nb_run`, `nb_view_image`, `nb_notebook_url` | ✓ | ✓ |
+| `nb_add_template`, `nb_add_exercise`, `checkpoint_done`, `chapter_done`, `log_detour`, `nb_fresh_start`, `nb_submit` | ✓ | hidden — there is no script to close, no `cells/` to insert from, and `nb_fresh_start` would clear the assignment. `nb_submit` mints a `submit/…` tag, which means "grade this" for a Pair Notebook and nothing for a mini-project |
+
+Which notebook, in order: `PAIR_NOTEBOOK_FILE`, then `pair-notebook.json`
+(`{"notebook": "assignment/mini-project.py"}`), then `notebook.py` if it is
+there, then — the common case — the one marimo notebook in the folder or one
+level under it. Two candidates and no `notebook.py` is the only failure, and it
+says so by name rather than claiming the notebook is unreachable. The choice is
+written into `session_artifacts/marimo_server.log` at every start.
+
+A mini-project repository therefore needs two files of its own:
+`.pi/settings.json` naming this package (the toolkit does not exist in a folder
+that has not asked for it — which is also why nothing here may be installed
+globally: it starts a notebook server in whatever folder pi opens in), and an
+`AGENTS.md` saying what the team's agent may and may not touch. The lesson
+contract is not it.
+
 ## Environment
 
 | variable | what |
 |---|---|
 | `MARIMO_URL` | an ALREADY RUNNING marimo server. Set it and the toolkit attaches instead of starting one — that is how the review harness pins a session. Unset (the normal case) it starts its own |
+| `PAIR_NOTEBOOK_FILE` | the notebook to work in, relative to the folder pi started in. Overrides everything above; absolute paths and `..` are refused |
 | `TUTOR_VISION_MODEL` | `provider/model-id` for reading photographs. Unset → an image-capable model on the tutor's own provider, then any zero-cost one; none found → the tutor asks the student to describe the drawing in words, which is a valid pass |
 | `TUTOR_REFEREE_MODEL` | `provider/model-id` for the ⚖️ appeal. Unreachable → the tutor resolves the appeal itself, generously |
 

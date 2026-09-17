@@ -71,9 +71,135 @@ import {
   scanKernelCode,
   stripRedundantImports,
 } from "./lib/pysrc.ts";
+import {
+  chooseNotebook,
+  DEFAULT_NOTEBOOK,
+  findNotebooks,
+  type NotebookChoice,
+  type NotebookIO,
+  safeNotebookPath,
+} from "./lib/notebook-target.ts";
 
 /** This file's directory. */
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// ── Which notebook, and whether there is a lesson over it ───────────────────
+//
+// A tutored module is `notebook.py` beside a `lesson/`, and that is what every
+// rule below still resolves to. The second shape is a mini-project: a team
+// repository whose notebook IS the assignment, with no lesson beside it. The
+// toolkit is worth as much there — an agent that edits the live notebook
+// rather than a file the browser has not re-read — and the filename was the
+// only thing in the way. lib/notebook-target.ts decides; this reads the disk
+// for it.
+//
+// ONCE, at load, like EXTERNAL_MARIMO: process.cwd() does not move, and a
+// resolution that ran per call could disagree with itself halfway through a
+// session — the server would be editing one file and resolveSession looking
+// for another.
+
+/** The walk in lib/notebook-target.ts, given this machine's disk. */
+const NOTEBOOK_IO: NotebookIO = {
+  list(dir) {
+    try {
+      return fs
+        .readdirSync(dir, { withFileTypes: true })
+        .map((e) => ({ name: e.name, file: e.isFile(), dir: e.isDirectory() }));
+    } catch {
+      return []; // unreadable is empty, never a throw at load
+    }
+  },
+  head(file) {
+    try {
+      // Some of these are half a megabyte of a student's work, and the
+      // generated App line is in the header of every one of them.
+      const fd = fs.openSync(file, "r");
+      try {
+        const buf = Buffer.alloc(8192);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        return buf.subarray(0, n).toString("utf-8");
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return "";
+    }
+  },
+};
+
+function resolveNotebook(): NotebookChoice {
+  const cwd = process.cwd();
+  const hasDefault = fs.existsSync(path.join(cwd, DEFAULT_NOTEBOOK));
+  let config: unknown;
+  try {
+    config = JSON.parse(fs.readFileSync(path.join(cwd, "pair-notebook.json"), "utf-8"))?.notebook;
+  } catch {
+    // no file, or a file nobody can parse: the other rules still answer
+  }
+  return chooseNotebook({
+    env: process.env.PAIR_NOTEBOOK_FILE,
+    config,
+    hasDefault,
+    // Only when the first three rules cannot answer. In a module folder this
+    // never runs at all.
+    found: hasDefault || safeNotebookPath(config) || safeNotebookPath(process.env.PAIR_NOTEBOOK_FILE)
+      ? []
+      : findNotebooks(cwd, NOTEBOOK_IO),
+  });
+}
+
+const NOTEBOOK = resolveNotebook();
+/** The notebook, relative — what marimo is handed and what a message says. */
+const NOTEBOOK_FILE = NOTEBOOK.file;
+/** The same file, absolute — what marimo's own /api/sessions is matched against. */
+const notebookPath = (): string => path.resolve(process.cwd(), NOTEBOOK_FILE);
+
+/**
+ * Is there a lesson over this notebook?
+ *
+ * The one question that separates the two shapes, and it is answered by the
+ * same file the chapter machinery already reads: no `lesson/index.json`, no
+ * chapters, nothing for `checkpoint_done` to close or `nb_add_template` to
+ * insert. Those tools are hidden at session_start rather than left for the
+ * model to discover and fail with — see the block there.
+ *
+ * Deliberately NOT a new setting. A folder either has a curriculum in it or
+ * it does not, and a mode that could disagree with the folder is a mode that
+ * will, on someone's machine, in week nine.
+ */
+const tutoredModule = (): boolean => loadChapters().length > 0;
+
+/**
+ * Tools that only mean anything inside a lesson, hidden when there is none.
+ *
+ * Not deleted, not refused — hidden, at session_start, the same way bash is.
+ * A refusal is a turn the student watches go wrong; a tool the model cannot
+ * see is a tool it cannot reach for.
+ *
+ *   nb_add_template   inserts from `cells/`, which a mini-project has not got
+ *   nb_add_exercise   a checkpoint's code box, and it is tagged with one
+ *   checkpoint_done   the closing ceremony: a log row and a note cell from a
+ *                     skeleton in a script that does not exist here
+ *   chapter_done      the same, one level up
+ *   log_detour        an off-script question needs a script to be off
+ *   nb_fresh_start    archives the notebook and CLEARS IT. In a team
+ *                     repository that is the assignment, and the one tool in
+ *                     here that could destroy a mini-project outright
+ *   nb_submit         pushes a `submit/…` tag, which is what starts grading
+ *                     for a Pair Notebook. A mini-project is graded on its
+ *                     pushes instead, and a tag that means "grade this" has
+ *                     no business being minted by an agent in that repo. The
+ *                     team's own `git` is right there — bash stays on.
+ */
+const LESSON_ONLY_TOOLS = [
+  "nb_add_template",
+  "nb_add_exercise",
+  "checkpoint_done",
+  "chapter_done",
+  "log_detour",
+  "nb_fresh_start",
+  "nb_submit",
+];
 
 // ── Health markers for the update channel ───────────────────────────────────
 // channel-update.ts moves this package's checkout to a newer tag and rolls it
@@ -230,7 +356,10 @@ const externalMarimo = () => EXTERNAL_MARIMO;
 /** The student's own copy, made on first run so the template stays pristine. */
 function bootstrapNotebook(): void {
   try {
-    const nb = path.join(process.cwd(), "notebook.py");
+    const nb = notebookPath();
+    // A mini-project's notebook is the assignment, committed in the clone;
+    // there is no template beside it and nothing to copy. The existsSync
+    // below is what makes that a no-op rather than a special case.
     const tpl = path.join(process.cwd(), "notebook.template.py");
     if (!fs.existsSync(nb) && fs.existsSync(tpl)) fs.copyFileSync(tpl, nb);
     // marimo's session snapshot RESTORES pressed buttons, and the cells behind
@@ -244,7 +373,12 @@ function bootstrapNotebook(): void {
     // same way: the tutor is told a photo just arrived, and goes looking at
     // the last session's picture. Drop the snapshot before the server starts;
     // a live session re-runs every cell anyway and writes a fresh one.
-    const snap = path.join(process.cwd(), "__marimo__", "session", "notebook.py.json");
+    const snap = path.join(
+      path.dirname(nb),
+      "__marimo__",
+      "session",
+      `${path.basename(nb)}.json`,
+    );
     if (fs.existsSync(snap)) fs.rmSync(snap, { force: true });
   } catch {
     // startMarimo will fail loudly enough if this mattered
@@ -297,6 +431,19 @@ function openInBrowser(url: string, onFailure: () => void): void {
 
 function startMarimo(): Promise<{ url?: string; error?: string }> {
   const cwd = process.cwd();
+  // Nothing decided which notebook this is, and more than one was on offer.
+  // Starting anyway would have marimo CREATE the file we fell back to — a
+  // blank page, in a repository whose real notebook is sitting next to it,
+  // and every nb_* call afterwards editing the blank one. Refuse, and name
+  // the fix: the message reaches the student through the agent.
+  if (NOTEBOOK.alternatives?.length && !fs.existsSync(notebookPath())) {
+    return Promise.resolve({
+      error:
+        `there is more than one marimo notebook here (${NOTEBOOK.alternatives.join(", ")}) ` +
+        `and no notebook.py, so I cannot tell which one is yours. Say which, in ` +
+        `pair-notebook.json: {"notebook": "${NOTEBOOK.alternatives[0]}"}`,
+    });
+  }
   bootstrapNotebook();
   let log: fs.WriteStream | null = null;
   try {
@@ -306,6 +453,10 @@ function startMarimo(): Promise<{ url?: string; error?: string }> {
     log = fs.createWriteStream(path.join(cwd, "session_artifacts", "marimo_server.log"), {
       flags: "a",
     });
+    // WHICH notebook, in the file the error messages already send people to.
+    // The name is a decision now (lib/notebook-target.ts), and "it edited the
+    // wrong file" is otherwise a question nothing on disk can answer.
+    log.write(`\n--- pair-notebook: ${NOTEBOOK_FILE} (by ${NOTEBOOK.from}) ---\n`);
   } catch {
     // a missing log is survivable; a missing server is not
   }
@@ -325,7 +476,7 @@ function startMarimo(): Promise<{ url?: string; error?: string }> {
     try {
       child = spawn(
         "uvx",
-        ["marimo", "edit", "--sandbox", "--no-token", "--headless", "notebook.py"],
+        ["marimo", "edit", "--sandbox", "--no-token", "--headless", NOTEBOOK_FILE],
         // Its own process group, so stopMarimo can take down the whole
         // uv -> python -> marimo chain rather than just the wrapper.
         { cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] },
@@ -655,9 +806,9 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
   }
   if (ids.length === 1) return { id: ids[0] };
   // More than one notebook on this server: pick ours by path. Exact first —
-  // the basename rule matches any notebook.py anywhere, which is a fallback
-  // for a marimo that reports paths differently, not a way to choose.
-  const want = path.join(process.cwd(), "notebook.py");
+  // the basename rule matches any file of that name anywhere, which is a
+  // fallback for a marimo that reports paths differently, not a way to choose.
+  const want = notebookPath();
   const exact = ids.filter((id) => {
     const s = sessions[id] ?? {};
     return s.path === want || s.filename === want;
@@ -666,7 +817,7 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
     ? exact
     : ids.filter((id) => {
         const s = sessions[id] ?? {};
-        return path.basename(s.path ?? s.filename ?? "") === "notebook.py";
+        return path.basename(s.path ?? s.filename ?? "") === path.basename(want);
       });
   // Ambiguity used to be fatal, and fatal here means fatal for the session:
   // the error carried NO_NOTEBOOK, which tells the tutor to announce that the
@@ -3488,9 +3639,21 @@ export default function (pi: ExtensionAPI) {
     // every student's machine. It read as working because the E2E harness
     // passes --exclude-tools bash on the command line, which hid it under
     // test — the one place it was never actually exercised.
+    //
+    // ── And the other shape ─────────────────────────────────────────────
+    // With no lesson over the notebook there is no chapter to close, no
+    // cells/ to insert from and no session log worth a ceremony, so the
+    // lesson tools are hidden instead — a model that can SEE checkpoint_done
+    // will call it, and what the student then reads is a tool failing at the
+    // end of work that went fine. bash stays in that folder: a mini-project
+    // is a git repository, and the team's agent has to be able to commit in
+    // it. The exclusion exists because a shell interrupts a LESSON, not
+    // because the toolkit is afraid of one.
     try {
       const active: string[] = pi.getActiveTools?.() ?? [];
-      if (active.includes("bash")) pi.setActiveTools?.(active.filter((n) => n !== "bash"));
+      const unwanted = tutoredModule() ? ["bash"] : LESSON_ONLY_TOOLS;
+      const keep = active.filter((n) => !unwanted.includes(n));
+      if (keep.length !== active.length) pi.setActiveTools?.(keep);
     } catch {
       /* an older pi without tool management: AGENTS.md still forbids it */
     }
@@ -6000,7 +6163,7 @@ export default function (pi: ExtensionAPI) {
       const dir = path.join(process.cwd(), "session_artifacts");
       try {
         fs.mkdirSync(dir, { recursive: true });
-        const nb = path.join(process.cwd(), "notebook.py");
+        const nb = notebookPath();
         if (fs.existsSync(nb)) fs.copyFileSync(nb, path.join(dir, `notebook-${stamp}.py`));
         const log = path.join(dir, "session_log.jsonl");
         if (fs.existsSync(log)) fs.renameSync(log, path.join(dir, `session_log-${stamp}.jsonl`));
@@ -6186,6 +6349,23 @@ export default function (pi: ExtensionAPI) {
       // how the student's punctuation got tidied in the first place — and how
       // two thirds of their sentence went missing in an m02 run.
       const edited = stripModelQuoteLines(params.code);
+      // ── Read before write ───────────────────────────────────────────────
+      // marimo refuses to overwrite a cell this context has not READ
+      // (_code_mode/_context.py: StaleCellError, "read-before-write guard"),
+      // and reading means touching `cell.code` — `cell.name`, which is all
+      // the existence check above needs, does not count.
+      //
+      // Inside a lesson that guard never fired: every cell the tutor edits it
+      // created itself, in this session, and an agent's own write records the
+      // read. A mini-project is the other way round — every cell was written
+      // by the team before pi started — so the FIRST edit of the session
+      // failed, twice (the tool's own retry), and the student was told the
+      // whiteboard was unavailable while it sat there working perfectly.
+      //
+      // The one line below is the guard's own remedy. Not
+      // `skip_staleness_check=True`: that turns the check off for everyone,
+      // including the case it exists for — a student editing the same cell in
+      // the browser while the agent overwrites it.
       const code =
         `import marimo._code_mode as cm\n` +
         `async with cm.get_context() as ctx:\n` +
@@ -6194,6 +6374,7 @@ export default function (pi: ExtensionAPI) {
         `        print("EDIT FAILED: no cell named", ${py(params.name)})\n` +
         `        print("Existing cells:", [n for n in _names if n and n != "_"])\n` +
         `    else:\n` +
+        `        _ = [c.code for c in ctx.cells if c.name == ${py(params.name)}]\n` +
         `        ctx.edit_cell(${py(params.name)}, ${py(stripRedundantImports(edited.code))})\n` +
         `        ctx.run_cell(${py(params.name)})\n`;
       const editResult = await runKernel(code, signal);
