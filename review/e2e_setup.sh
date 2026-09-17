@@ -278,7 +278,12 @@ except Exception:
     pass
 " "$SANDBOX/.pi/settings.json" 2>/dev/null)
 
-KICKOFF="Please start the tutoring session. Your CHAPTER SCRIPT message contains the current curriculum — begin at its first checkpoint, unless a RESUME CONTEXT message is present (then greet the student back and follow it). Keep replies short and conversational (1-3 spoken sentences, one question at a time), and use the nb_* notebook tools for all notebook work — the student is watching this terminal."
+# No pedagogy in here. It used to ask for "1-3 spoken sentences, one question
+# at a time", which is m02's contract -- and a module whose AGENTS.md asks for
+# ONE short sentence then had its voice set by the harness instead of by the
+# thing under test. Say what to start and where the student is; leave how to
+# talk to AGENTS.md, which is what a real session has and this line is not.
+KICKOFF="Please start the tutoring session. Your CHAPTER SCRIPT message contains the current curriculum — begin at its first checkpoint, unless a RESUME CONTEXT message is present (then greet the student back and follow it). Follow your AGENTS.md contract, and use the nb_* notebook tools for all notebook work — the student is watching this terminal."
 
 # MARIMO_URL is passed ONLY in the pre-started mode. An empty one would still
 # count as set for some shells, and the extension keys its whole lifecycle off
@@ -287,39 +292,67 @@ ENVS=(--env "TUTOR_VISION_MODEL=${TUTOR_VISION_MODEL:-netsci/vision}"
       --env "TUTOR_REFEREE_MODEL=${TUTOR_REFEREE_MODEL:-netsci/referee}")
 [ -n "$MARIMO_URL" ] && ENVS+=(--env "MARIMO_URL=$MARIMO_URL")
 
-# Where the pane lands. Left to herdr it goes wherever herdr's default is,
-# which on a reviewer's machine is whatever workspace they were not looking at
-# — a live session running unwatched in another window is the one thing a gate
-# run must not be. E2E_HERDR_WORKSPACE puts it beside the work it is testing.
+# Where the pane lands.
 #
-# `herdr agent start --workspace` takes an ID (`w1D`), not the LABEL a reviewer
-# reads off their own screen ("pair-notebook") — and it fails with
-# `agent_placement_not_found` AFTER the sandbox is built and the toolkit banner
-# is printed, which reads like the toolkit is broken rather than the flag. Take
-# either: resolve a label through `herdr workspace list`, and pass anything
-# unrecognised straight through so a future herdr that accepts more still works.
-PANE_ARGS=(--cwd "$SANDBOX" --no-focus)
-if [ -n "${E2E_HERDR_WORKSPACE:-}" ]; then
-  WS=$(herdr workspace list 2>/dev/null | python3 -c "
+# herdr 0.9 split `agent start` in two: it no longer creates a pane, and
+# `--cwd`, `--env` and `--workspace` moved to `herdr pane split`. The old
+# single call failed with a bare `unknown option: --cwd` AFTER the sandbox was
+# built and the toolkit banner printed, which reads like the toolkit is broken
+# rather than the flag. So: split a pane, then start the agent INTO it.
+#
+# The pane is split off a base pane that is sitting at a shell prompt. Left to
+# chance that is whatever workspace the reviewer was not looking at, and a live
+# session running unwatched in another window is the one thing a gate run must
+# not be. E2E_HERDR_PANE names one; E2E_HERDR_WORKSPACE picks any idle shell in
+# a workspace, by label or id.
+pane_pick() {
+  herdr pane list 2>/dev/null | python3 -c "
 import json, sys
-want = sys.argv[1]
+want = (sys.argv[1] or '').strip()
 try:
-    ws = json.load(sys.stdin)['result']['workspaces']
+    panes = json.load(sys.stdin)['result']['panes']
 except Exception:
-    ws = []
-for w in ws:
-    if w.get('label') == want or w.get('workspace_id') == want:
-        print(w['workspace_id'])
-        break
-else:
-    print(want)
-" "$E2E_HERDR_WORKSPACE" 2>/dev/null || echo "$E2E_HERDR_WORKSPACE")
-  PANE_ARGS+=(--workspace "$WS")
-fi
+    sys.exit(1)
+# A pane running an agent is somebody's session; splitting off it is fine, but
+# a plain shell is tidier and cannot be mistaken for the thing under test.
+free = [p for p in panes if not p.get('agent')]
+if want:
+    ws = None
+    for p in panes:
+        if p.get('workspace_id') == want:
+            ws = want
+            break
+    if ws is None:
+        import subprocess
+        out = subprocess.run(['herdr', 'workspace', 'list'], capture_output=True, text=True)
+        try:
+            for w in json.loads(out.stdout)['result']['workspaces']:
+                if w.get('label') == want:
+                    ws = w['workspace_id']
+                    break
+        except Exception:
+            pass
+    if ws:
+        scoped = [p for p in free if p.get('workspace_id') == ws] or \
+                 [p for p in panes if p.get('workspace_id') == ws]
+        if scoped:
+            print(scoped[0]['pane_id'])
+            sys.exit(0)
+print((free or panes)[0]['pane_id'])
+" "${1:-}"
+}
 
-herdr agent start "$AGENT" "${PANE_ARGS[@]}" \
-  "${ENVS[@]}" \
-  -- pi --model "$TUTOR_MODEL" --thinking low -a \
+BASE_PANE="${E2E_HERDR_PANE:-$(pane_pick "${E2E_HERDR_WORKSPACE:-}")}"
+[ -n "$BASE_PANE" ] || { echo "error: no herdr pane to split from" >&2; exit 1; }
+
+PANE=$(herdr pane split --pane "$BASE_PANE" --direction down --ratio 0.5 \
+  --cwd "$SANDBOX" "${ENVS[@]}" --no-focus |
+  python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")
+[ -n "$PANE" ] || { echo "error: herdr pane split gave no pane id" >&2; exit 1; }
+echo "note: tutor pane $PANE (split off $BASE_PANE)" >&2
+
+herdr agent start "$AGENT" --kind pi --pane "$PANE" --timeout 120000 \
+  -- --model "$TUTOR_MODEL" --thinking low -a \
      --no-skills --no-prompt-templates \
      --no-extensions "${EXTS[@]}" "$KICKOFF" >/dev/null
 
@@ -345,6 +378,7 @@ STATE="$SANDBOX/review-state.env"
 {
   echo "SANDBOX=$SANDBOX"
   echo "AGENT=$AGENT"
+  echo "PANE=$PANE"
   echo "MARIMO_URL=$MARIMO_URL"
   echo "EXTERNAL_MARIMO=$EXTERNAL"
   # Only set when E2E_BROWSER_CMD started one: a headless browser has no window

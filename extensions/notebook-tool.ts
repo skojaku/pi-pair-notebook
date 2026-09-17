@@ -6930,7 +6930,12 @@ export default function (pi: ExtensionAPI) {
     "You personally know about 0.000002% of the people alive today.",
     // — networks that run the modern world —
     "The web, citation networks, and Hollywood all share one shape: a few superstar hubs.",
-    "Hub networks shrug off random failures — but fall fast to targeted attacks on hubs.",
+    // "Hub networks shrug off random failures — but fall fast to targeted
+    // attacks on hubs." lived here until 2026-09-17. It is robust-yet-fragile
+    // stated outright, which is the ANSWER to m03's last checkpoint, and a
+    // live probe put it on the loading spinner while the student was still two
+    // checkpoints away from it. A tip may carry history, a name, a date or a
+    // number. It may not carry a module's punchline.
     "Barabási and Albert, 1999: hubs come from growth plus the rich getting richer.",
     "The rich-get-richer idea is older than the web: Yule in 1925, Simon in 1955, Price in 1965.",
     "Merton named it the Matthew effect in 1968 — credit flows to whoever already has some.",

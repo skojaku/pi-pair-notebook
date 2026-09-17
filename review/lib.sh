@@ -24,6 +24,15 @@ wait_idle() { # wait_idle <agent> [timeout_seconds]
 }
 
 read_screen() { # read_screen <agent> [lines]
+  # herdr 0.9 prints the pane text directly; it used to wrap it in a JSON
+  # envelope. Accept either, so this harness works against both -- a stale
+  # parse here fails as a Python traceback in the middle of a gate run, which
+  # reads like the tutor died.
   herdr agent read "$1" --source recent --lines "${2:-50}" | python3 -c \
-    'import json,sys; print(json.load(sys.stdin)["result"]["read"]["text"])'
+    'import json, sys
+raw = sys.stdin.read()
+try:
+    print(json.loads(raw)["result"]["read"]["text"])
+except Exception:
+    print(raw, end="")'
 }

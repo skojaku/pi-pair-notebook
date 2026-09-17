@@ -21,8 +21,12 @@ if read_screen "$AGENT" 60 | python3 "$(dirname "$0")/dialog_probe.py" |
   exit 1
 fi
 
-herdr agent send "$AGENT" "$MSG" >/dev/null
-sleep 1
-herdr pane send-keys "$(pane_id "$AGENT")" enter >/dev/null
+# herdr 0.9 renamed `agent send` to `agent prompt`, and it submits rather than
+# typing — so the separate Enter is gone too. Without this the old call failed
+# with herdr's usage banner, which looks like a harness that is not installed.
+# --wait is deliberately NOT used: it "does not track turns", so on an agent
+# that is already working it can match that turn's end rather than this one.
+# wait_idle below polls the state the harness actually means.
+herdr agent prompt "$AGENT" "$MSG" >/dev/null
 wait_idle "$AGENT" "${TURN_TIMEOUT:-240}"
 read_screen "$AGENT" "${3:-50}"
