@@ -1666,7 +1666,7 @@ const TYPE_IT = "✎ Let me type something instead";
  * just delivered the reveal, and every line printed under it pushes it further
  * up a terminal the student may not think to scroll. Live, in order: the
  * reveal, a tool status line, a tip, a separator, the picker. On a short
- * window the payoff is off the top and the student answers "Where to next?"
+ * window the payoff is off the top and the student answers "anything first?"
  * having never read what their answer bought them.
  */
 let quietForPicker = false;
@@ -1675,9 +1675,9 @@ let quietForPicker = false;
  * The last thing the tutor SAID, short enough to sit on top of a picker.
  *
  * The reveal is the payoff for the answer the student just gave, and the
- * picker that follows it is titled "Where to next?" and nothing else — so
- * when the reveal has scrolled off the top, the student is choosing with no
- * idea what they were shown. Carrying the last line into the dialog costs a
+ * chapter-end picker that follows it is titled "anything first?" and nothing
+ * else — so when the reveal has scrolled off the top, the student is choosing
+ * with no idea what they were shown. Carrying the last line into the dialog costs a
  * line of repetition when it is still visible, and saves the whole beat when
  * it is not.
  */
@@ -2512,9 +2512,9 @@ function noteSkeleton(cpId: string): string {
  * cold reader meets in a document that has not begun. The answer still gets
  * logged and still lands in the closing session_record.
  *
- * It suppresses the "where to next?" picker as well, for the same reason:
- * mechanics ask the student nothing, so there is no answer to pace against.
- * See the picker in checkpoint_done.
+ * It used to suppress the "where to next?" picker as well — mechanics ask the
+ * student nothing, so there was no answer to pace against. That picker is gone
+ * from checkpoint_done entirely; the pace gate is chapter_done's now.
  */
 function noteSuppressed(cpId: string): boolean {
   try {
@@ -2639,8 +2639,9 @@ function scriptedReveal(cpId: string): string {
 /**
  * Has the tutor SAID anything since the student last typed?
  *
- * checkpoint_done opens the "Where to next?" picker, and a picker under a
- * silent close is everything the student gets for a right answer. In one live
+ * A silent close is everything the student gets for a right answer. When
+ * checkpoint_done still opened a "Where to next?" picker, that dialog was all
+ * they got; it is gone, and a silent close is now a blank. In one live
  * m02 session it happened three times: at cp2_diameter the pane went from
  * their correct answer straight to "Writing that into your notebook…" and the
  * dialog — the tool call sat in an assistant message with no text block in it
@@ -3407,9 +3408,6 @@ export default function (pi: ExtensionAPI) {
   const cellReviewWarned = new Map<string, number>();
   // chapter_done's "was this chapter actually taught?" refusals, per chapter.
   const chapterGateWarned = new Map<string, number>();
-  // Checkpoints whose pace question was never actually put to the student
-  // (the picker could not run). The next build for them is bounced once.
-  const paceUnasked = new Set<string>();
   // The build-ordering refusal, per checkpoint. It was the last uncapped
   // guard in the file: whenever the open checkpoint ended up wrong, every
   // build refused forever and the only escape it named wrote a duplicate row.
@@ -3982,9 +3980,15 @@ export default function (pi: ExtensionAPI) {
       const MORE = "Give me one more practice problem";
       if (ctx?.ui?.select) {
         const title = chapters[idx]?.title ?? "this part";
+        // The reveal, above the question, so the beat survives a short window.
+        // It used to ride on checkpoint_done's picker; this is the only picker
+        // the pace gate opens now, and the line it needs to carry is the same
+        // one — the payoff for the answer the student gave a moment ago.
+        const said = lastTutorLine(ctx);
+        const ask = `Before we leave "${title}" — anything first?`;
         const { choice, typed } = await askStudent(
           ctx,
-          `Before we leave "${title}" — anything first?`,
+          said ? `${said}\n\n${ask}` : ask,
           [READY, ASK_Q, MORE],
         );
         if (choice !== READY) {
@@ -4317,14 +4321,14 @@ export default function (pi: ExtensionAPI) {
     name: "checkpoint_done",
     label: "Checkpoint done",
     description:
-      "Finish a checkpoint: this ONE call logs it (graded artifact), adds the notebook note " +
-      "cell from the chapter script's note: skeleton, and asks the student whether to move " +
-      "on. Call it right after you judge their answer — never hand-write log JSON, never " +
-      "hand-write the note cell. The result tells you what the student chose: only 'ready' " +
-      "means you may start the next checkpoint.",
-    promptSnippet: "Log a checkpoint, add its note cell, and ask the student what's next",
+      "Finish a checkpoint: this ONE call logs it (graded artifact) and adds the notebook " +
+      "note cell from the chapter script's note: skeleton. Call it right after you judge " +
+      "their answer — never hand-write log JSON, never hand-write the note cell. It does " +
+      "NOT stop the student: the result tells you to go straight on to the next " +
+      "checkpoint, and the one pace question left is chapter_done's.",
+    promptSnippet: "Log a checkpoint and add its note cell",
     promptGuidelines: [
-      "End EVERY checkpoint with checkpoint_done — it replaces hand-written log JSON, the note cell, and the transition question.",
+      "End EVERY checkpoint with checkpoint_done — it replaces hand-written log JSON and the note cell.",
     ],
     parameters: Type.Object({
       status: STATUS_PARAM,
@@ -4409,10 +4413,10 @@ export default function (pi: ExtensionAPI) {
         return toResult({
           out:
             `NOT LOGGED — you just asked "${hanging.slice(0, 90)}" and they have not ` +
-            `answered. Closing here opens the "where to next?" dialog, which takes over ` +
-            `the keyboard: their answer would go into the picker and never reach you, ` +
-            `and the checkpoint would close itself. Say nothing more, WAIT for their ` +
-            `reply, react to it, and then call checkpoint_done.\n` +
+            `answered. Closing here files a row for a question nobody answered, and the ` +
+            `result tells you to start the NEXT checkpoint — so their reply would land ` +
+            `under someone else's question. Say nothing more, WAIT for their reply, ` +
+            `react to it, and then call checkpoint_done.\n` +
             `If that question was rhetorical (a cliffhanger into the next chapter) or ` +
             `they have already answered it, call checkpoint_done again right now — no ` +
             `need to say anything first.`,
@@ -4969,77 +4973,34 @@ export default function (pi: ExtensionAPI) {
           : `That was the last checkpoint of this chapter — call chapter_done next. It ` +
             `loads the chapter that holds "${nextId}"; do not start that checkpoint from ` +
             `memory.`;
-      const READY = "Ready for the next question";
-      const ASK_Q = "I have a question first";
-      const MORE = "Give me another one like that";
-      // When the picker cannot run — a dead notebook, a headless restart —
-      // the pace gate becomes a sentence, and a live run simply carried on
-      // into the next checkpoint without ever asking. So the sentence leads
-      // with the prohibition, and the next build is bounced once to make it
-      // stick.
-      let nextLine =
-        `No picker available. Do NOT start the next checkpoint yet: ask the student in ` +
-        `plain text whether they are ready, END YOUR TURN, and wait for their answer. ` +
-        `Only when they say yes: ${goNext}`;
-      let paceAsked = false;
-      // A `note: none` checkpoint asked the student NOTHING. cp0 is the
-      // greeting, and its script says in as many words to say hello, close,
-      // and go straight into the first real checkpoint. Stopping there for
-      // "where to next?" offers three rows that are all false: there is no
-      // next question yet, no answer of theirs to have a question about, and
-      // "give me another one like that" points at a "one" that does not
-      // exist. A live run put that menu on screen ten seconds into the
-      // session, after the student had typed nothing but "hello", and made
-      // them press Enter on it before the lesson had begun. Nothing was
-      // asked, so there is nothing to pace.
-      if (suppressed) {
-        paceAsked = true;
-        nextLine =
-          `Nothing was asked here, so the student was NOT stopped to choose where to go ` +
-          `next — treat them as READY. ${goNext}`;
-      } else if (ctx?.ui?.select) {
-        paceAsked = true;
-        // The reveal, above the question, so the beat survives a short window.
-        const said = lastTutorLine(ctx);
-        const { choice, typed } = await askStudent(
-          ctx,
-          said ? `${said}\n\nWhere to next?` : "Where to next?",
-          [READY, ASK_Q, MORE],
-        );
-        const practiceRound = /_extra/.test(id);
-        nextLine =
-          choice === READY
-            ? `The student is READY. ${goNext}`
-            : choice === ASK_Q
-              ? `The student has a QUESTION. Do NOT advance: ask what it is, answer it ` +
-                `properly, leave a souvenir cell, call log_detour, then ask them again ` +
-                `in plain text whether to move on. When they are ready: ${goNext}`
-              : choice === MORE
-                ? // A checkpoint with no fresh_variants has nothing to practise
-                  // (cp0 is a calibration question), and a second helping of an
-                  // already-repeated one is where the loop started.
-                  !hasFreshVariants(baseCheckpointId(id))
-                  ? `The student asked for MORE PRACTICE, but this checkpoint has no ` +
-                    `practice variant — it is not that kind of question. Say so warmly in ` +
-                    `ONE sentence, then: ${goNext}`
-                  : practiceRound
-                    ? `They have already had a practice round here. Give at most one more, ` +
-                      `then move on regardless: ${goNext}`
-                    : `The student wants MORE PRACTICE. Do NOT advance yet: improvise ONE ` +
-                      `problem of the same kind on NEW data, from this checkpoint's ` +
-                      `fresh_variants. Guide, then checkpoint_done again with id ` +
-                      `"${baseCheckpointId(id)}_extra" (never a fail). After that: ${goNext}`
-                : choice === TYPE_IT && typed
-                  ? `Do NOT start the next checkpoint. The student typed this instead of ` +
-                    `picking a row — these are THEIR words, react to them: "${typed}". ` +
-                    `Answer whatever it asks (a question gets a proper answer, a souvenir ` +
-                    `cell and log_detour), then ask in plain text whether they are ready. ` +
-                    `Only when they say yes: ${goNext}`
-                  : `The student closed the picker — ask in plain text what they'd like to do. ` +
-                    `If they want to move on: ${goNext}`;
-      }
-
-      if (!paceAsked && nextId) paceUnasked.add(nextId);
+      // The "Where to next?" picker used to open here, on every close, with
+      // READY / a question / more practice. It is gone, and the pace gate now
+      // lives once per chapter, in chapter_done's "anything first?".
+      //
+      // Two things killed it. At a chapter end the two fired back to back —
+      // this picker, then chapter_done's, with not one word from the student
+      // in between; in a chapter of two checkpoints that is every second
+      // close, and the run that reported it was a module of three such
+      // chapters, nine stops in an hour. And inside a chapter the three rows
+      // bought nothing the keyboard did not already offer: a student with a
+      // question types it, and one who wants another problem asks for it, at
+      // any moment, without a dialog taking the keyboard to hear it.
+      //
+      // So nothing here waits for the student any more, and the rows that
+      // carried real instructions — the detour, the practice round — are
+      // carried by the tool result instead, for the tutor to act on if the
+      // student raises them.
+      const practiceLine =
+        hasFreshVariants(baseCheckpointId(id)) && !/_extra/.test(id)
+          ? ` If they ask for another one like it, improvise ONE problem of the same kind ` +
+            `on NEW data from this checkpoint's fresh_variants, guide it, and close that ` +
+            `with id "${baseCheckpointId(id)}_extra" (never a fail).`
+          : "";
+      const nextLine =
+        `The student was NOT stopped to choose where to go next — that ask happens once a ` +
+        `chapter now, inside chapter_done. ${goNext} If they say anything before your ` +
+        `first question, deal with THAT first: a question gets a proper answer, a ` +
+        `souvenir cell and log_detour.${practiceLine}`;
       return toResult({
         out:
           `Logged${logged ? "" : " (LOG WRITE FAILED — tell no one, keep teaching)"}. ` +
@@ -5814,16 +5775,6 @@ export default function (pi: ExtensionAPI) {
       const refusedScaffold = kernelGuard(String(params.scaffold ?? ""));
       if (refusedScaffold) return toResult({ out: refusedScaffold, failed: false });
       const exCpId = String(params.checkpoint ?? "").trim();
-      if (exCpId && paceUnasked.has(exCpId)) {
-        paceUnasked.delete(exCpId);
-        return toResult({
-          out:
-            `NOT INSERTED — the "where to next?" picker could not run when you closed the ` +
-            `last checkpoint, so the student has not said they are ready. Ask them in ` +
-            `plain text, END YOUR TURN, and wait. When they say yes, call this again.`,
-          failed: false,
-        });
-      }
       const exKey = `exercise:${exCpId}`;
       if (
         exCpId &&
@@ -6035,17 +5986,6 @@ export default function (pi: ExtensionAPI) {
       // Keyed by TOOL as well as checkpoint: a shared budget meant the
       // exercise tool's refusals spent the template tool's, and a genuine
       // first-try violation was then waved through.
-      if (paceUnasked.has(cpId)) {
-        paceUnasked.delete(cpId);
-        return toResult({
-          out:
-            `NOT INSERTED — the "where to next?" picker could not run when you closed the ` +
-            `last checkpoint, so the student has not said they are ready. Ask them in ` +
-            `plain text, END YOUR TURN, and wait. When they say yes, call this again — it ` +
-            `will go in.`,
-          failed: false,
-        });
-      }
       const tplKey = `template:${cpId}`;
       if (
         pendingCheckpoint &&
@@ -6242,7 +6182,6 @@ export default function (pi: ExtensionAPI) {
           }
           buildOrderWarned.clear();
           lateCloseWarned.clear();
-          paceUnasked.clear();
           resumeGaps.clear();
           viewedPhotos.clear();
           // Same rewind for the transcript mark: without it, whatever the
