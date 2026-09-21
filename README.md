@@ -194,6 +194,40 @@ script, the recent conversation — goes to a stronger model, and its ruling com
 back as a binding `REFEREE VERDICT` message. Appeals are logged as
 participation, never as defiance.
 
+## Two views: app and code
+
+A module opens the notebook one of two ways, set by `notebook_view` in its
+`lesson/index.json` and defaulting to **app**:
+
+```jsonc
+{ "module": "m03-robustness", "notebook_view": "code", "chapters": [ ... ] }
+```
+
+| | **app** (default) | **code** |
+|---|---|---|
+| the student sees | a clean document (`?view-as=present`) | marimo's own editor |
+| they write code in | a `mo.ui.code_editor` widget with a ▶ Run button | a **real marimo cell** |
+| the code lives in | `assets/exercises/<name>.py`, because marimo does not serialise a widget's value | `notebook.py` itself |
+| `nb_add_exercise` emits | `_ed` + `_out` + `_sent`, all hidden | `_brief` + **`_work`** + `_send` + `_sent`, only `_work` visible |
+| the tutor reads it with | `nb_read(["<name>_ed.value"])` | `nb_read_code("<name>_work")` |
+| errors are shown by | `run_student_code`, as one friendly line | marimo, in place, as they will see forever after |
+
+App mode is right for a module where the coding is incidental and the student
+should never meet an editor. Code mode is right for a module whose subject IS
+the tool. **It is per-module and it does not convert for free** — a module
+moving to code mode has to deal with three things:
+
+- **marimo forbids two cells binding the same name.** Nine scaffolds that all
+  open `g = ig.Graph(...)` are nine hard errors. Give every cell its own
+  variables; the constraint is worth teaching, because it is how a marimo
+  notebook holds together.
+- **Every hidden cell is one click from being read.** `hide_code` collapses a
+  cell in the editor, it does not hide it. Anything that contains an answer —
+  a grader, a reference value — belongs in an imported module beside the
+  notebook, not in a cell.
+- **A real cell has no `.value`.** `nb_read` cannot reach it, which is what
+  `nb_read_code` is for, and what the `_work` suffix tells the signal watcher.
+
 ## What a module folder must provide
 
 The extension resolves everything from the **current working directory** — pi

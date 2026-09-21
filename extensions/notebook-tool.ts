@@ -564,7 +564,7 @@ function startMarimo(): Promise<{ url?: string; error?: string }> {
  */
 let announcedNotebook = false;
 function announceNotebook(url: string, opened: boolean): void {
-  const body = notebookBanner(`${url.replace(/\/+$/, "")}/?view-as=present`, opened);
+  const body = notebookBanner(notebookUrl(url), opened);
   if (!body) return;
   if (opened && announcedNotebook) return;
   announcedNotebook = true;
@@ -589,7 +589,7 @@ function marimoUrl(): Promise<{ url?: string; error?: string }> {
       // Everything downstream reads the env var, including a nb_run the
       // student's own code might make.
       process.env.MARIMO_URL = r.url;
-      openInBrowser(`${r.url}/?view-as=present`, () => {
+      openInBrowser(notebookUrl(r.url), () => {
         // No browser opener on this machine at all — say it again, harder,
         // because a notebook nobody has open is a kernel that never wakes.
         announcedNotebook = false;
@@ -649,7 +649,7 @@ function reopenPage(): boolean {
   if (Date.now() - lastReopen < RELAUNCH_COOLDOWN_MS) return false;
   lastReopen = Date.now();
   try {
-    openInBrowser(`${marimoBase()}/?view-as=present`, () => {});
+    openInBrowser(notebookUrl(marimoBase()), () => {});
     return true;
   } catch {
     return false;
@@ -792,7 +792,7 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
           "The notebook page is not open, so its kernel is asleep and nothing can be built " +
           "there. Ask the student to open " +
           (/^https?:\/\/\S+$/.test(process.env.MARIMO_URL ?? "")
-            ? `${marimoBase()}/?view-as=present — that exact address, in one sentence`
+            ? `${notebookUrl(marimoBase())} — that exact address, in one sentence`
             : "the notebook tab (it may have been closed)") +
           " — and keep teaching in the terminal meanwhile. Never ask them to start the " +
           "notebook themselves.",
@@ -1401,7 +1401,7 @@ function toResult({ out, failed, reason }: { out: string; failed: boolean; reaso
       reason === "no-page"
         ? `\nRECOVERY: the notebook server is fine — the student's notebook TAB is closed, ` +
           `so the page has no kernel. Ask them, in one warm sentence, to open ` +
-          `${marimoBase()}/?view-as=present (it may already be reopening by itself), wait ` +
+          `${notebookUrl(marimoBase())} (it may already be reopening by itself), wait ` +
           `for their reply, then retry this call. Do NOT switch to terminal-only mode for ` +
           `this and do NOT tell them the whiteboard is broken.`
         : `\nRECOVERY: retry this call ONCE. If it fails again, tell the student the ` +
@@ -1883,6 +1883,38 @@ function moduleId(): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * How the notebook opens, from lesson/index.json's `notebook_view`.
+ *
+ *   "app"  (the default) — `?view-as=present`, a clean document. The student
+ *          never sees a cell editor; everything they touch is a widget in the
+ *          page, and every cell the toolkit inserts is hide_code.
+ *   "code" — marimo's own editor. The student types into REAL cells, which is
+ *          the tool they will use for the rest of their life, and the code
+ *          they write is `notebook.py` itself rather than a widget value the
+ *          format does not serialise.
+ *
+ * It is per-module and defaults to "app" on purpose: a module written for one
+ * view does not survive the other by accident. Code mode costs a module three
+ * things it has to have thought about — marimo forbids two cells defining the
+ * same name, every hidden helper is one click from being read, and a real cell
+ * has no `.value` for nb_read to reach.
+ */
+function moduleView(): "app" | "code" {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
+    return JSON.parse(raw).notebook_view === "code" ? "code" : "app";
+  } catch {
+    return "app";
+  }
+}
+
+/** The address to open the notebook at, in whichever view the module asked for. */
+function notebookUrl(base: string): string {
+  const root = String(base ?? "").replace(/\/+$/, "");
+  return moduleView() === "code" ? `${root}/` : `${root}/?view-as=present`;
 }
 
 /** Flat checkpoint order across all chapters — the script is the authority. */
@@ -3482,16 +3514,28 @@ export default function (pi: ExtensionAPI) {
         void handleAppeal(pi);
         return;
       }
-      // Two kinds of box send: a photo drop area, and an exercise code box
-      // (whose widget name ends in _ed). They need opposite instructions —
-      // one is read with the vision model, the other with nb_read — and a
-      // tutor told to call nb_view_image on a code box burns a turn on an
-      // error the student then watches it recover from.
-      const isCode = /_ed$/.test(widget);
+      // Three kinds of box send, and they need three different instructions.
+      // A photo drop area is read with the vision model. An app-view code box
+      // (_ed) is a widget, read with nb_read. A code-mode cell (_work) is a
+      // REAL marimo cell the student typed into: it has no .value at all, and
+      // a tutor told to nb_read it burns a turn on an error the student then
+      // watches it recover from — which is exactly what the _ed/photo split
+      // was added to stop.
+      const isWidgetCode = /_ed$/.test(widget);
+      const isCellCode = /_work$/.test(widget);
       pi.sendMessage(
         {
           customType: "student-signal",
-          content: isCode
+          content: isCellCode
+            ? `The student clicked "Send my code to my tutor" in the notebook: they have ` +
+              `run their own cell and are handing it in. Read it with ` +
+              `nb_read_code("${widget}") now — it is a real marimo cell, so it has no ` +
+              `.value and nb_read cannot reach it, and do not ask them to paste it. ` +
+              `Their output is already on screen under the cell; react to what THEIR ` +
+              `code actually printed, and ask the checkpoint's question about it. If it ` +
+              `does not run, say so warmly and point at the one line to change — they ` +
+              `can edit and re-run as often as they like, then send again.`
+            : isWidgetCode
             ? `The student clicked "Send my code to my tutor" in the notebook: they have ` +
               `run their code and are handing it in. Read it with ` +
               `nb_read(["${widget}.value"]) now — do not ask them to paste it. Their ` +
@@ -3557,7 +3601,7 @@ export default function (pi: ExtensionAPI) {
       if (mctx?.messageType !== "assistant") return markdown;
       const env = process.env.MARIMO_URL ?? "";
       if (!/^https?:\/\/\S+$/.test(env)) return markdown;
-      const r = rewriteRivalServer(markdown, `${marimoBase()}/?view-as=present`);
+      const r = rewriteRivalServer(markdown, notebookUrl(marimoBase()));
       if (!r.hits.length) return markdown;
       // Once the message has stopped moving, and twice per session at most.
       if (!mctx?.isStreaming && rivalNotes < 2) {
@@ -5896,6 +5940,89 @@ export default function (pi: ExtensionAPI) {
         `        "appears here once you have pressed ▶ Run.*</span>"\n` +
         `    )\n` +
         `_sent`;
+      // ── code mode ────────────────────────────────────────────────────────
+      // The student types into a REAL marimo cell instead of a code_editor
+      // widget. Four cells, and only one of them is theirs:
+      //
+      //   <name>_brief   the instructions          (hide_code)
+      //   <name>_work    THE SCAFFOLD, VISIBLE     <- the student's own cell
+      //   <name>_send    the 📨 button             (hide_code)
+      //   <name>_sent    acts on the press         (hide_code)
+      //
+      // There is no _out cell and no run_student_code: the work cell's last
+      // expression IS its output, rendered by marimo the way every other cell
+      // in the notebook is, and the code lives in notebook.py rather than in a
+      // widget value the format does not serialise. That also retires the
+      // assets/exercises/ mirror — in code mode the submitted notebook already
+      // holds what they wrote.
+      //
+      // marimo forbids two cells binding the same name, so a module in code
+      // mode has to give every scaffold its own variables. That is the
+      // module's problem, not this tool's, but it is the first thing that
+      // goes wrong when a module is switched over.
+      if (moduleView() === "code") {
+        const briefBody = `mo.md(${pyMd(params.instructions)})`;
+        const sendBody =
+          `${name}_send = mo.ui.run_button(label="📨 Send my code to my tutor")\n` +
+          `mo.vstack([\n` +
+          `    mo.md(\n` +
+          `        "<span style='color:#6A6D75;font-size:13px'>Edit the cell above and run "\n` +
+          `        "it as often as you like — nothing breaks. When it does what you want, "\n` +
+          `        "press 📨 — that is what hands it in and tells your tutor to look.</span>"\n` +
+          `    ),\n` +
+          `    ${name}_send,\n` +
+          `])`;
+        const sentCellBody =
+          `from pathlib import Path as _P\n` +
+          `if ${name}_send.value:\n` +
+          `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
+          `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
+          `        _f.write(${py(name + "_work")} + "\\n")\n` +
+          `    _sent = mo.md("✅ **Handed in.** Your tutor is reading your code now.")\n` +
+          `else:\n` +
+          // Phrased so it is still true months later, like the app-view one:
+          // naming what the button does works live AND on a cold read.
+          `    _sent = mo.md(\n` +
+          `        "<span style='color:#6A6D75;font-size:13px'>*The 📨 button above is "\n` +
+          `        "what hands this code to your tutor.*</span>"\n` +
+          `    )\n` +
+          `_sent`;
+        let codeModeCode =
+          `import marimo._code_mode as cm\n` +
+          `async with cm.get_context() as ctx:\n` +
+          `    _names = [c.name for c in ctx.cells]\n` +
+          `    if ${py(name + "_work")} in _names:\n` +
+          `        print("exercise already in the notebook — skipped duplicate insert")\n` +
+          `    else:\n` +
+          `        _cid = ctx.create_cell(${py(briefBody)}, name=${py(name + "_brief")}, hide_code=True)\n` +
+          `        ctx.run_cell(_cid)\n` +
+          `        _first = _cid\n` +
+          // hide_code=False is the whole point: this is the cell they edit.
+          `        _cid = ctx.create_cell(${py(String(params.scaffold ?? ""))}, name=${py(name + "_work")}, hide_code=False, after=_cid)\n` +
+          `        ctx.run_cell(_cid)\n` +
+          `        _cid = ctx.create_cell(${py(sendBody)}, name=${py(name + "_send")}, hide_code=True, after=_cid)\n` +
+          `        ctx.run_cell(_cid)\n` +
+          `        _cid = ctx.create_cell(${py(sentCellBody)}, name=${py(name + "_sent")}, hide_code=True, after=_cid)\n` +
+          `        ctx.run_cell(_cid)\n`;
+        codeModeCode += focusCellCode("_first", "        ");
+        const cmResult = await runKernel(codeModeCode, signal);
+        if (!cmResult.failed) await pinAppealToBottom(signal);
+        if (!cmResult.failed) {
+          cmResult.out =
+            `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
+            `scaffold in '${name}_work', and a 📨 Send button under it. Its own output is ` +
+            `what the bench prints — there is no separate output cell. Ask for the send, ` +
+            `then WAIT: their press starts your turn, and you read their code with ` +
+            `nb_read_code("${name}_work"), never nb_read.\n` +
+            (droppedEnv.length
+              ? `(env_vars is ignored in code mode — a real cell already sees every ` +
+                `notebook variable. Dropped: ${droppedEnv.join(", ")}.)\n`
+              : "") +
+            cmResult.out;
+        }
+        return toResult(cmResult);
+      }
+
       let code =
         `import marimo._code_mode as cm\n` +
         `from pathlib import Path as _P\n` +
@@ -6420,6 +6547,79 @@ export default function (pi: ExtensionAPI) {
     ...quiet("Having a look at your notebook…"),
   });
 
+  // ── nb_read_code ──────────────────────────────────────────────────────────
+  // Code mode's counterpart to nb_read. A code_editor widget has a .value the
+  // kernel can hand over; a REAL marimo cell has nothing of the sort — its
+  // source is the notebook file. So this reads notebook.py rather than the
+  // kernel, which also means it still works when the student's cell is the
+  // thing that is broken.
+  //
+  // marimo writes edit-mode saves on every run, so what is on disk is what
+  // they last ran. A cell they typed into and never ran reads as the scaffold,
+  // which is correct: nothing was run, so there is nothing to judge yet.
+  pi.registerTool({
+    name: "nb_read_code",
+    label: "Read a student's cell",
+    description:
+      "Read the CODE a student wrote in one of their own notebook cells. Give the cell " +
+      "name, e.g. 'cp1_build_work'. This is how you read their work in a code-mode module: " +
+      "their cell is a real marimo cell, it has no .value, and nb_read cannot reach it. " +
+      "Returns the source as they last ran it.",
+    promptSnippet: "Read the source of a student's own notebook cell (code mode)",
+    parameters: Type.Object({
+      status: STATUS_PARAM,
+      name: Type.String({ description: "Cell name, e.g. 'cp1_build_work'." }),
+    }),
+    async execute(_id, params) {
+      const cell = String(params.name ?? "").trim();
+      if (!/^[A-Za-z_]\w*$/.test(cell)) {
+        return toResult({ out: `'${cell}' is not a cell name.`, failed: true });
+      }
+      let source: string;
+      try {
+        source = fs.readFileSync(path.join(process.cwd(), "notebook.py"), "utf-8");
+      } catch {
+        return toResult({ out: "Could not read notebook.py.", failed: true });
+      }
+      const lines = source.split("\n");
+      const start = lines.findIndex((l) => new RegExp(`^def ${cell}\\(`).test(l));
+      if (start < 0) {
+        const names = lines
+          .map((l) => /^def (\w+)\(/.exec(l)?.[1])
+          .filter((n): n is string => Boolean(n) && n !== "_");
+        return toResult({
+          out:
+            `No cell named '${cell}' in notebook.py. Take the name from the build line ` +
+            `or from the signal that started your turn, never from memory. ` +
+            `Cells present: ${names.join(", ") || "(none named)"}.`,
+          failed: true,
+        });
+      }
+      let end = lines.length;
+      for (let i = start + 1; i < lines.length; i++) {
+        if (/^@app\.(cell|function)/.test(lines[i]) || /^if __name__/.test(lines[i])) {
+          end = i;
+          break;
+        }
+      }
+      // Drop marimo's own bookkeeping: the def line, the trailing `return`
+      // tuple it generates, and the blank lines around both. What is left is
+      // what the student sees in the cell.
+      const kept: string[] = [];
+      for (const l of lines.slice(start + 1, end)) {
+        if (/^\s{4}return(\s*$|\s|\()/.test(l)) continue;
+        kept.push(l.startsWith("    ") ? l.slice(4) : l);
+      }
+      while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
+      while (kept.length && !kept[0].trim()) kept.shift();
+      return toResult({
+        out: `${cell}, as they last ran it:\n\n${kept.join("\n")}`,
+        failed: false,
+      });
+    },
+    ...quiet("Reading your code…"),
+  });
+
   // ── nb_view_image ─────────────────────────────────────────────────────────
   // The tutor model is text-only; this tool is its eyes. Kernel side: pull the
   // upload bytes, save the original (graded artifact), EXIF-rotate + downscale
@@ -6721,7 +6921,7 @@ export default function (pi: ExtensionAPI) {
           failed: false,
         });
       }
-      const url = `${r.url}/?view-as=present`;
+      const url = notebookUrl(r.url);
       // Whatever they typed to get here was about finding the notebook, not
       // about the lesson — so it must not end up quoted in the next
       // checkpoint's note as their worked answer. The FIRST of mechanicsAsked's
