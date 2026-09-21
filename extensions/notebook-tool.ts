@@ -5946,7 +5946,7 @@ export default function (pi: ExtensionAPI) {
       //
       //   <name>_brief   the instructions          (hide_code)
       //   <name>_work    THE SCAFFOLD, VISIBLE     <- the student's own cell
-      //   <name>_send    the 📨 button             (hide_code)
+      //   <name>_send    the Submit button        (hide_code)
       //   <name>_sent    acts on the press         (hide_code)
       //
       // There is no _out cell and no run_student_code: the work cell's last
@@ -5962,29 +5962,28 @@ export default function (pi: ExtensionAPI) {
       // goes wrong when a module is switched over.
       if (moduleView() === "code") {
         const briefBody = `mo.md(${pyMd(params.instructions)})`;
+        // ONE button, one word. The student runs the cell with marimo's own
+        // affordance, so nothing here competes with it, and the label says
+        // what pressing it does without a sentence underneath explaining the
+        // label. A line of grey prose under every exercise is a line the
+        // student reads nine times in a session and needs once.
         const sendBody =
-          `${name}_send = mo.ui.run_button(label="📨 Send my code to my tutor")\n` +
-          `mo.vstack([\n` +
-          `    mo.md(\n` +
-          `        "<span style='color:#6A6D75;font-size:13px'>Edit the cell above and run "\n` +
-          `        "it as often as you like — nothing breaks. When it does what you want, "\n` +
-          `        "press 📨 — that is what hands it in and tells your tutor to look.</span>"\n` +
-          `    ),\n` +
-          `    ${name}_send,\n` +
-          `])`;
+          `${name}_send = mo.ui.run_button(label="Submit")\n` +
+          `${name}_send`;
         const sentCellBody =
           `from pathlib import Path as _P\n` +
           `if ${name}_send.value:\n` +
           `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
           `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
           `        _f.write(${py(name + "_work")} + "\\n")\n` +
-          `    _sent = mo.md("✅ **Handed in.** Your tutor is reading your code now.")\n` +
+          `    _sent = mo.md("✅ **Submitted.**")\n` +
           `else:\n` +
-          // Phrased so it is still true months later, like the app-view one:
-          // naming what the button does works live AND on a cold read.
+          // Not mo.md(""): an empty markdown node is a blank cell in the
+          // keepsake, and reopening the notebook always lands on this branch.
+          // One short line, true on a cold read months later.
           `    _sent = mo.md(\n` +
-          `        "<span style='color:#6A6D75;font-size:13px'>*The 📨 button above is "\n` +
-          `        "what hands this code to your tutor.*</span>"\n` +
+          `        "<span style='color:#6A6D75;font-size:13px'>*Submit hands this cell "\n` +
+          `        "to your tutor.*</span>"\n` +
           `    )\n` +
           `_sent`;
         let codeModeCode =
@@ -6010,8 +6009,8 @@ export default function (pi: ExtensionAPI) {
         if (!cmResult.failed) {
           cmResult.out =
             `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
-            `scaffold in '${name}_work', and a 📨 Send button under it. Its own output is ` +
-            `what the bench prints — there is no separate output cell. Ask for the send, ` +
+            `scaffold in '${name}_work', and a Submit button under it. Its own output is ` +
+            `what the bench prints — there is no separate output cell. Ask for the submit, ` +
             `then WAIT: their press starts your turn, and you read their code with ` +
             `nb_read_code("${name}_work"), never nb_read.\n` +
             (droppedEnv.length
