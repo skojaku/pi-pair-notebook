@@ -227,6 +227,16 @@ moving to code mode has to deal with three things:
   notebook, not in a cell.
 - **A real cell has no `.value`.** `nb_read` cannot reach it, which is what
   `nb_read_code` is for, and what the `_work` suffix tells the signal watcher.
+- **A module can drop the Submit button.** `"tutor_wakes_on": "pass"` in
+  `lesson/index.json` means the RUN is the hand-in: the extension watches
+  the live work cell through marimo's kernel and starts a turn the moment
+  the bench comes back green. The module's half is one marker — its bench
+  must put `data-tutor-verdict="pass"` in the output it renders on a pass.
+  What goes under the box instead of Submit is a 🆘 **I'm stuck** button,
+  because a fail wakes nobody: a green cell arrives on its own, a red one
+  never does, and the student needs a handle on the door that has always
+  been open (typing in the terminal). Its press reaches the tutor as a
+  request for help, explicitly not as a hand-in.
 - **A finished checkpoint folds itself away.** A real notebook grows, and by
   cp7 the exercise in hand sits under six solved ones. So as each new
   exercise lands, every earlier checkpoint collapses to a line the student

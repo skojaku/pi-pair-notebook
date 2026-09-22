@@ -3205,7 +3205,7 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `        _base, _, _kind = _name.rpartition("_")\n` +
         `        if not _base or _base == _keep or (_base + "_work") not in _src:\n` +
         `            continue\n` +
-        `        if _kind in ("send", "sent", "cue"):\n` +
+        `        if _kind in ("send", "sent", "help", "helped"):\n` +
         `            ctx.delete_cell(_name)\n` +
         `            _done.append(_name)\n` +
         `        elif _kind == "work" and _name in _open:\n` +
@@ -3671,6 +3671,31 @@ export default function (pi: ExtensionAPI) {
       // the referee model rules, then the verdict message starts the turn.
       if (widget === "tutor_stuck") {
         void handleAppeal(pi);
+        return;
+      }
+      // ── "I'm stuck" ─────────────────────────────────────────────────
+      // Not a hand-in. In a wake-on-pass module a green cell arrives on its
+      // own and a red one never does, so this press is the student saying
+      // the cell will not go — and what it must NOT do is put the tutor in
+      // hand-in mode, congratulating them on work they know is wrong.
+      if (/_help$/.test(widget)) {
+        const work = widget.replace(/_help$/, "_work");
+        pi.sendMessage(
+          {
+            customType: "student-signal",
+            content:
+              `The student pressed "I'm stuck" under '${work}'. They are ASKING FOR ` +
+              `HELP, not handing work in: assume it does not pass, and never ` +
+              `congratulate. Read their code with nb_read_code("${work}") now — a real ` +
+              `marimo cell has no .value, and never ask them to paste it. Their output, ` +
+              `or the traceback, is already on screen under the cell. Say nothing about ` +
+              `Pass or Fail; name the line you can see and ask ONE smaller question ` +
+              `about it, the smallest one that gets them moving. Never write their line, ` +
+              `and never hand them the answer because they asked twice.`,
+            display: false,
+          },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
         return;
       }
       // Three kinds of box send, and they need three different instructions.
@@ -6241,6 +6266,38 @@ export default function (pi: ExtensionAPI) {
         // what pressing it does without a sentence underneath explaining the
         // label. A line of grey prose under every exercise is a line the
         // student reads nine times in a session and needs once.
+        // ── The stuck button ──────────────────────────────────────────
+        // The one button a wake-on-pass module has, and it is the student's,
+        // not the lesson's: nothing hands work in any more, so the only
+        // thing left to press is "come and look at this with me".
+        //
+        // It is here because dropping Submit took something real away. A
+        // tutor used to learn that a checkpoint was going badly by being
+        // handed a red cell; now a fail is silent, and a beginner who does
+        // not know they are allowed to interrupt can sit in front of one
+        // for a long time. Typing in the terminal has always worked and
+        // still does — this is the same door with a handle on it.
+        const helpBody =
+          `${name}_help = mo.ui.run_button(label="🆘 I'm stuck — ask my tutor")\n` +
+          `${name}_help`;
+        const helpedBody =
+          `from pathlib import Path as _P\n` +
+          `if ${name}_help.value:\n` +
+          `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
+          `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
+          `        _f.write(${py(name + "_help")} + "\\n")\n` +
+          `    _asked = mo.md("✋ **Asked.** Your tutor is looking at this cell.")\n` +
+          `else:\n` +
+          // Not mo.md(""): an empty markdown node is a blank cell in the
+          // keepsake. This is also the line that tells the student what
+          // happens when they run — one grey sentence, doing the job the
+          // Submit caption used to do, and still true on a cold read.
+          `    _asked = mo.md(\n` +
+          `        "<span style='color:#6A6D75;font-size:13px'>*Run the cell whenever you "\n` +
+          `        "are ready — your tutor sees it as soon as it passes. Stuck, or it "\n` +
+          `        "will not run? Press the button, or just say so in the terminal.*</span>"\n` +
+          `    )\n` +
+          `_asked`;
         const sendBody =
           `${name}_send = mo.ui.run_button(label="Submit to Tutor")\n` +
           `${name}_send`;
@@ -6260,20 +6317,12 @@ export default function (pi: ExtensionAPI) {
           `        "this cell in; your tutor answers in the terminal.*</span>"\n` +
           `    )\n` +
           `_sent`;
-        // The line under the box in a module where the RUN is the hand-in.
-        // It replaces a button, so it has to do the button's other job: say
-        // that someone is watching, and say what to do when the cell fights
-        // back. Written to be true on a cold read months later — a caption,
-        // never an instruction to a session that has ended.
-        const cueBody =
-          `mo.md(\n` +
-          `    "<span style='color:#6A6D75;font-size:13px'>*Run the cell when you are "\n` +
-          `    "ready. Your tutor sees it as soon as it passes — and if it will not, "\n` +
-          `    "say so in the terminal and they will look at it with you.*</span>"\n` +
-          `)`;
         const handIn = wakesOnPass()
-          ? // No button at all: the bench in their own cell is the hand-in.
-            `        _cid = ctx.create_cell(${py(cueBody)}, name=${py(name + "_cue")}, hide_code=True, after=_cid)\n` +
+          ? // Nothing hands the work in — the bench in their own cell does.
+            // What is under the box is the way OUT of a cell that will not go.
+            `        _cid = ctx.create_cell(${py(helpBody)}, name=${py(name + "_help")}, hide_code=True, after=_cid)\n` +
+            `        ctx.run_cell(_cid)\n` +
+            `        _cid = ctx.create_cell(${py(helpedBody)}, name=${py(name + "_helped")}, hide_code=True, after=_cid)\n` +
             `        ctx.run_cell(_cid)\n`
           : `        _cid = ctx.create_cell(${py(sendBody)}, name=${py(name + "_send")}, hide_code=True, after=_cid)\n` +
             `        ctx.run_cell(_cid)\n` +
@@ -6306,15 +6355,16 @@ export default function (pi: ExtensionAPI) {
         if (!cmResult.failed) {
           cmResult.out =
             (wakesOnPass()
-              ? `Exercise inserted as a REAL cell the student edits: your instructions and ` +
-                `the scaffold in '${name}_work'. There is no button and no output cell — the ` +
-                `cell's last line is the bench, and RUNNING it is the hand-in. Say your one ` +
-                `line, then WAIT and say nothing: the moment their cell passes a turn starts ` +
-                `for you, and you read their code with nb_read_code("${name}_work"), never ` +
-                `nb_read. A cell that does not pass is silent to you, and that is the design: ` +
-                `they fix it and run it again as often as they like. If they speak first, ` +
-                `answer what they asked — a wrong blank is still met with ONE smaller ` +
-                `question about the line you can see.\n`
+              ? `Exercise inserted as a REAL cell the student edits: your instructions, ` +
+                `the scaffold in '${name}_work', and a 🆘 "I'm stuck" button under it. ` +
+                `Nothing hands work in — the cell's last line is the bench, and RUNNING it ` +
+                `is the hand-in. Say your one line, then WAIT and say nothing. Two things ` +
+                `can start your next turn: the cell PASSES, and you read their code with ` +
+                `nb_read_code("${name}_work") and ask the checkpoint's question; or they ` +
+                `press 🆘, which is them saying it will not go — then assume it does not ` +
+                `pass, never congratulate, and ask ONE smaller question about the line you ` +
+                `can see. A fail on its own is silent to you, and that is the design: they ` +
+                `fix it and run it again as often as they like.\n`
               : `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
                 `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own ` +
                 `output is what the bench prints — there is no separate output cell. Ask for ` +
