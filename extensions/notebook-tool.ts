@@ -5960,7 +5960,7 @@ export default function (pi: ExtensionAPI) {
       //
       //   <name>_brief   the instructions          (hide_code)
       //   <name>_work    THE SCAFFOLD, VISIBLE     <- the student's own cell
-      //   <name>_send    the Submit button        (hide_code)
+      //   <name>_send    the Submit to Tutor button (hide_code)
       //   <name>_sent    acts on the press         (hide_code)
       //
       // There is no _out cell and no run_student_code: the work cell's last
@@ -5982,7 +5982,7 @@ export default function (pi: ExtensionAPI) {
         // label. A line of grey prose under every exercise is a line the
         // student reads nine times in a session and needs once.
         const sendBody =
-          `${name}_send = mo.ui.run_button(label="Submit")\n` +
+          `${name}_send = mo.ui.run_button(label="Submit to Tutor")\n` +
           `${name}_send`;
         const sentCellBody =
           `from pathlib import Path as _P\n` +
@@ -5990,14 +5990,14 @@ export default function (pi: ExtensionAPI) {
           `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
           `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
           `        _f.write(${py(name + "_work")} + "\\n")\n` +
-          `    _sent = mo.md("✅ **Submitted.**")\n` +
+          `    _sent = mo.md("✅ **Submitted.** Check your tutor's comments in the terminal.")\n` +
           `else:\n` +
           // Not mo.md(""): an empty markdown node is a blank cell in the
           // keepsake, and reopening the notebook always lands on this branch.
           // One short line, true on a cold read months later.
           `    _sent = mo.md(\n` +
-          `        "<span style='color:#6A6D75;font-size:13px'>*Submit hands this cell "\n` +
-          `        "to your tutor.*</span>"\n` +
+          `        "<span style='color:#6A6D75;font-size:13px'>*Submit to Tutor hands "\n` +
+          `        "this cell in; your tutor answers in the terminal.*</span>"\n` +
           `    )\n` +
           `_sent`;
         let codeModeCode =
@@ -6023,7 +6023,7 @@ export default function (pi: ExtensionAPI) {
         if (!cmResult.failed) {
           cmResult.out =
             `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
-            `scaffold in '${name}_work', and a Submit button under it. Its own output is ` +
+            `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own output is ` +
             `what the bench prints — there is no separate output cell. Ask for the submit, ` +
             `then WAIT: their press starts your turn, and you read their code with ` +
             `nb_read_code("${name}_work"), never nb_read.\n` +
