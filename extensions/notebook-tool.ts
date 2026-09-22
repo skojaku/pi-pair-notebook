@@ -1936,6 +1936,46 @@ function moduleView(): "app" | "code" {
   }
 }
 
+/**
+ * Does this module hand its work in by RUNNING the cell, rather than by
+ * pressing a button? `"tutor_wakes_on": "pass"` in lesson/index.json.
+ *
+ * A Submit button is one more thing on the page and one more thing to
+ * explain, and in a code-mode module it is redundant: the cell the student
+ * runs already ends in the module's own bench, and the bench already knows
+ * whether it passed. So the module can say "the run IS the hand-in" and the
+ * watcher below wakes the tutor the moment a work cell comes back green.
+ *
+ * Opt-in per module, and the module has to hold up its end: its bench must
+ * mark a pass in its output with `data-tutor-verdict="pass"` (see the
+ * watcher). Without the setting a module keeps its button, which is why
+ * m01 and m02 are untouched by any of this.
+ */
+function wakesOnPass(): boolean {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
+    return JSON.parse(raw).tutor_wakes_on === "pass" && moduleView() === "code";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The work cell of the checkpoint on screen, while one is open.
+ *
+ * Set when an exercise is built, cleared when its checkpoint closes: the
+ * pass watcher polls only while this is set, so a session spends nothing on
+ * it between checkpoints, and a student re-running an old green cell weeks
+ * later wakes nobody.
+ */
+let liveWorkCell: string | null = null;
+/** (cell, code) pairs already reported, so one pass is one turn. */
+const passReported = new Set<string>();
+/** True while the tutor is mid-turn: the watcher does not poll over a turn. */
+let turnInFlight = false;
+/** True while a poll is in the air, so a slow kernel cannot stack them up. */
+let passPolling = false;
+
 /** The address to open the notebook at, in whichever view the module asked for. */
 function notebookUrl(base: string): string {
   const root = String(base ?? "").replace(/\/+$/, "");
@@ -3161,12 +3201,11 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `    _open = {c.name for c in ctx.cells if c.name and not c.config.hide_code}\n` +
         `    _keep = ${py(keep)}\n` +
         `    _done = []\n` +
-        `    _show = []\n` +
         `    for _name, _code in _src.items():\n` +
         `        _base, _, _kind = _name.rpartition("_")\n` +
         `        if not _base or _base == _keep or (_base + "_work") not in _src:\n` +
         `            continue\n` +
-        `        if _kind in ("send", "sent"):\n` +
+        `        if _kind in ("send", "sent", "cue"):\n` +
         `            ctx.delete_cell(_name)\n` +
         `            _done.append(_name)\n` +
         `        elif _kind == "work" and _name in _open:\n` +
@@ -3201,17 +3240,9 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `            elif _head[:1].isascii():\n` +
         `                _head = "\\U0001F4DD " + _head\n` +
         `            ctx.edit_cell(_name, "mo.accordion({%r: mo.md(%s)})" % (_head, _seg))\n` +
+        `            ctx.run_cell(_name)\n` +
         `            _done.append(_name)\n` +
-        `            _show.append(_name)\n` +
-        `    print("folded:", ", ".join(_done) if _done else "nothing to fold")\n` +
-        // The re-run goes in a SECOND context, and that is not tidiness. A
-        // run queued beside its own edit executes the new body against the
-        // graph the OLD one had: every folded cell came back saying the
-        // name mo is not defined, on screen, in a notebook whose cells were
-        // all correct. Let the first batch land, then run.
-        `async with cm.get_context() as ctx:\n` +
-        `    for _name in _show:\n` +
-        `        ctx.run_cell(_name)\n`,
+        `    print("folded:", ", ".join(_done) if _done else "nothing to fold")\n`,
       signal,
     );
   } catch {
@@ -3688,6 +3719,80 @@ export default function (pi: ExtensionAPI) {
     }
   }, 2000);
   (signalTimer as any).unref?.();
+
+  // ── The run IS the hand-in ────────────────────────────────────────────
+  // In a module with `"tutor_wakes_on": "pass"` there is no Submit button.
+  // The student fills the blanks and runs the cell the way they will use a
+  // notebook for the rest of their life, and the moment the bench in their
+  // own last line comes back green, this starts the tutor's turn.
+  //
+  // It reads the kernel rather than a file, because a button writes a line
+  // and a cell does not: `ctx.cells` carries each cell's status, its errors
+  // and its last output, so a pass is a fact about the notebook and not a
+  // message anyone had to remember to send.
+  //
+  // A FAIL WAKES NOBODY, and that is the module's choice, not an oversight.
+  // The student fixes it and runs it again; the tutor is one line away in
+  // the terminal whenever they want it, and `<name>_cue` under the box says
+  // so. What this watcher must never do is fire twice for the same code —
+  // a student who re-runs a green cell to look at the picture again is not
+  // handing it in a second time.
+  const passTimer = setInterval(() => {
+    void (async () => {
+      const cell = liveWorkCell;
+      if (!cell || passPolling || turnInFlight || !wakesOnPass()) return;
+      // Never poll on top of a turn: the tutor may be holding the kernel
+      // itself, and a turn queued behind a turn is the student answered
+      // twice. The abort keeps a poll inside its own interval — without it
+      // a closed notebook tab makes every tick wait out resolveSession.
+      passPolling = true;
+      const r = await runKernel(
+        `import hashlib\n` +
+          `import marimo._code_mode as cm\n` +
+          `async with cm.get_context() as ctx:\n` +
+          `    _c = [c for c in ctx.cells if c.name == ${py(cell)}]\n` +
+          `    if _c:\n` +
+          `        _o = _c[0].output\n` +
+          `        _h = str(_o.data) if _o is not None else ""\n` +
+          // The marker is the module's half of the bargain: its bench puts
+          // data-tutor-verdict="pass" in the output it renders. Hunting for
+          // a tick or the word "Pass" instead would fire on a student's own
+          // print, on a figure's alt text, on a note cell quoting the word.
+          `        if _c[0].status == "idle" and 'data-tutor-verdict="pass"' in _h:\n` +
+          // A digest of the code, not hash(): Python salts hash() per
+          // process, so a kernel that restarted mid-session would call the
+          // same green cell a new pass and hand it in twice.
+          `            print("PASS", hashlib.md5(_c[0].code.encode()).hexdigest()[:12])\n`,
+        AbortSignal.timeout(5000),
+      ).finally(() => {
+        passPolling = false;
+      });
+      if (r.failed) return;
+      const m = /PASS ([0-9a-f]+)/.exec(r.out);
+      if (!m) return;
+      const key = `${cell}:${m[1]}`;
+      if (passReported.has(key)) return;
+      passReported.add(key);
+      pi.sendMessage(
+        {
+          customType: "student-signal",
+          content:
+            `Their cell '${cell}' has just run and the bench says Pass. That is the ` +
+            `hand-in — there is no button in this module, and nothing else is coming. ` +
+            `Read it with nb_read_code("${cell}") now: it is a real marimo cell, so it ` +
+            `has no .value and nb_read cannot reach it, and never ask them to paste it. ` +
+            `Their output is already on screen under the cell. Say ONE specific line ` +
+            `about what THEY wrote — not that it passed, which they can see — and then ` +
+            `ask the checkpoint's own question, the one the bench cannot.`,
+          display: false,
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    })().catch(() => {
+      // the watcher is a convenience — never let it break a turn
+    });
+  }, 3000);
+  (passTimer as any).unref?.();
 
   // Normal exit, /resume, /new: take the notebook server with us. A marimo
   // left behind holds port 2718 against the next session, and its kernel still
@@ -5054,6 +5159,10 @@ export default function (pi: ExtensionAPI) {
       // where the next checkpoint actually begins.
       const turnsTaken = turnsInCheckpoint + 1;
       turnsInCheckpoint = -1; // turn_end brings it to 0; a closed checkpoint is not a stuck one
+      // The pass watcher was looking at this checkpoint's cell. It is closed
+      // now, so a student who reopens that fold and runs the cell again is
+      // looking at their own work, not handing it in.
+      liveWorkCell = null;
       const logged = appendLog({
         type: "checkpoint",
         id,
@@ -6151,6 +6260,25 @@ export default function (pi: ExtensionAPI) {
           `        "this cell in; your tutor answers in the terminal.*</span>"\n` +
           `    )\n` +
           `_sent`;
+        // The line under the box in a module where the RUN is the hand-in.
+        // It replaces a button, so it has to do the button's other job: say
+        // that someone is watching, and say what to do when the cell fights
+        // back. Written to be true on a cold read months later — a caption,
+        // never an instruction to a session that has ended.
+        const cueBody =
+          `mo.md(\n` +
+          `    "<span style='color:#6A6D75;font-size:13px'>*Run the cell when you are "\n` +
+          `    "ready. Your tutor sees it as soon as it passes — and if it will not, "\n` +
+          `    "say so in the terminal and they will look at it with you.*</span>"\n` +
+          `)`;
+        const handIn = wakesOnPass()
+          ? // No button at all: the bench in their own cell is the hand-in.
+            `        _cid = ctx.create_cell(${py(cueBody)}, name=${py(name + "_cue")}, hide_code=True, after=_cid)\n` +
+            `        ctx.run_cell(_cid)\n`
+          : `        _cid = ctx.create_cell(${py(sendBody)}, name=${py(name + "_send")}, hide_code=True, after=_cid)\n` +
+            `        ctx.run_cell(_cid)\n` +
+            `        _cid = ctx.create_cell(${py(sentCellBody)}, name=${py(name + "_sent")}, hide_code=True, after=_cid)\n` +
+            `        ctx.run_cell(_cid)\n`;
         let codeModeCode =
           `import marimo._code_mode as cm\n` +
           `async with cm.get_context() as ctx:\n` +
@@ -6164,24 +6292,34 @@ export default function (pi: ExtensionAPI) {
           // hide_code=False is the whole point: this is the cell they edit.
           `        _cid = ctx.create_cell(${py(String(params.scaffold ?? ""))}, name=${py(name + "_work")}, hide_code=False, after=_cid)\n` +
           `        ctx.run_cell(_cid)\n` +
-          `        _cid = ctx.create_cell(${py(sendBody)}, name=${py(name + "_send")}, hide_code=True, after=_cid)\n` +
-          `        ctx.run_cell(_cid)\n` +
-          `        _cid = ctx.create_cell(${py(sentCellBody)}, name=${py(name + "_sent")}, hide_code=True, after=_cid)\n` +
-          `        ctx.run_cell(_cid)\n`;
+          handIn;
         codeModeCode += focusCellCode("_first", "        ");
         // Clear the desk before the new work lands: every finished
         // checkpoint folds to a line, and the page the student scrolls is
         // the exercise in hand with an index of their own work above it.
         await foldFinishedCheckpoints(name, signal);
         const cmResult = await runKernel(codeModeCode, signal);
+        // From here until the checkpoint closes, the watcher is looking at
+        // this one cell and no other.
+        if (!cmResult.failed && wakesOnPass()) liveWorkCell = `${name}_work`;
         if (!cmResult.failed) await pinAppealToBottom(signal);
         if (!cmResult.failed) {
           cmResult.out =
-            `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
-            `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own output is ` +
-            `what the bench prints — there is no separate output cell. Ask for the submit, ` +
-            `then WAIT: their press starts your turn, and you read their code with ` +
-            `nb_read_code("${name}_work"), never nb_read.\n` +
+            (wakesOnPass()
+              ? `Exercise inserted as a REAL cell the student edits: your instructions and ` +
+                `the scaffold in '${name}_work'. There is no button and no output cell — the ` +
+                `cell's last line is the bench, and RUNNING it is the hand-in. Say your one ` +
+                `line, then WAIT and say nothing: the moment their cell passes a turn starts ` +
+                `for you, and you read their code with nb_read_code("${name}_work"), never ` +
+                `nb_read. A cell that does not pass is silent to you, and that is the design: ` +
+                `they fix it and run it again as often as they like. If they speak first, ` +
+                `answer what they asked — a wrong blank is still met with ONE smaller ` +
+                `question about the line you can see.\n`
+              : `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
+                `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own ` +
+                `output is what the bench prints — there is no separate output cell. Ask for ` +
+                `the submit, then WAIT: their press starts your turn, and you read their code ` +
+                `with nb_read_code("${name}_work"), never nb_read.\n`) +
             (droppedEnv.length
               ? `(env_vars is ignored in code mode — a real cell already sees every ` +
                 `notebook variable. Dropped: ${droppedEnv.join(", ")}.)\n`
@@ -6502,6 +6640,8 @@ export default function (pi: ExtensionAPI) {
           // to a lesson the student chose to throw away. -1 for the same
           // reason as the other two resets: turn_end has not run yet.
           turnsInCheckpoint = -1;
+          liveWorkCell = null;
+          passReported.clear();
           studentSaidSince(ctx, true);
           pi.sendMessage(
             {
@@ -7300,6 +7440,7 @@ export default function (pi: ExtensionAPI) {
     }
   };
   pi.on("turn_start", async (_event, ctx: any) => {
+    turnInFlight = true;
     if (!ctx.hasUI) return;
     showTrivia(ctx);
     if (triviaTimer) clearInterval(triviaTimer);
@@ -7311,6 +7452,7 @@ export default function (pi: ExtensionAPI) {
   // any turn that produced words or a tool call — see the bottom of turn_end.
   let emptyTurns = 0;
   pi.on("turn_end", async (event: any) => {
+    turnInFlight = false;
     if (triviaTimer) {
       clearInterval(triviaTimer);
       triviaTimer = null;
