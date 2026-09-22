@@ -20,6 +20,7 @@ import { createInterface } from "node:readline/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE_URL = process.env.NETSCI_BASE_URL ?? "https://llm.skojaku.com/v1";
 const MODELS = path.join(os.homedir(), ".pi", "agent", "models.json");
@@ -354,6 +355,35 @@ try {
   warn(`could not write the skill (${e.message}).`);
   line("     Not a problem — your assistant still works, it just will not know");
   line("     the mini-project's team steps without being told them.");
+}
+
+// --- lecture notes quiz -------------------------------------------------------
+// Students ask for a quiz. The skill tells the assistant to fetch the
+// published lecture note and write questions from that page, not from memory.
+// Global, same reason as classroom-teammates: no .pi/ folder in the assignment.
+say("Adding the lecture-quiz skill to ~/.pi/agent/skills");
+const QUIZ_DIR = path.join(os.homedir(), ".pi", "agent", "skills", "lecture-quiz");
+const QUIZ_LOCAL = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", "lecture-quiz", "SKILL.md");
+const QUIZ_URL = "https://raw.githubusercontent.com/skojaku/pi-pair-notebook/main/skills/lecture-quiz/SKILL.md";
+try {
+  let quizMd = "";
+  if (fs.existsSync(QUIZ_LOCAL)) quizMd = fs.readFileSync(QUIZ_LOCAL, "utf8");
+  if (!quizMd.trim()) {
+    const res = await fetch(QUIZ_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    quizMd = await res.text();
+  }
+  if (!quizMd.includes("name: lecture-quiz")) throw new Error("skill file did not look right");
+  fs.mkdirSync(QUIZ_DIR, { recursive: true });
+  const quizTarget = path.join(QUIZ_DIR, "SKILL.md");
+  const quizSame = fs.existsSync(quizTarget) && fs.readFileSync(quizTarget, "utf8") === quizMd;
+  if (quizSame) ok("already up to date");
+  else {
+    fs.writeFileSync(quizTarget, quizMd);
+    ok("your assistant can make a quiz from the lecture notes");
+  }
+} catch (e) {
+  warn(`could not write the lecture-quiz skill (${e.message}).`);
 }
 
 // --- what plain `pi` starts, outside a lesson --------------------------------

@@ -32,6 +32,7 @@
   },
   "files": [
     "extensions/",
+    "skills/",
     "setup/",
     "review/",
     "README.md",

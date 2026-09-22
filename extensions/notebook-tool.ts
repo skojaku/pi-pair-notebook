@@ -3833,6 +3833,20 @@ export default function (pi: ExtensionAPI) {
         }
         writeChapterState(chapter.id);
         const num = chapters.findIndex((c) => c.id === chapter.id) + 1;
+        // Course voice is not in the module's AGENTS.md on older clones.
+        // One hidden message, every session, so the greeting and the quiz
+        // rule do not depend on which module folder they opened.
+        try {
+          const voice = fs.readFileSync(path.join(EXT_DIR, "course-voice.md"), "utf8").trim();
+          if (voice) {
+            pi.sendMessage(
+              { customType: "course-voice", content: voice, display: false },
+              { deliverAs: "nextTurn" },
+            );
+          }
+        } catch {
+          /* missing file: the module AGENTS.md still carries the rules */
+        }
         // A finished module gets NO chapter script: it ends "work its
         // checkpoints in order... then call chapter_done", which is the exact
         // opposite of the resume brief above, and re-running cp8 appends a
