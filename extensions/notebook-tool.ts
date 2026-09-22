@@ -1969,6 +1969,14 @@ function wakesOnPass(): boolean {
  * later wakes nobody.
  */
 let liveWorkCell: string | null = null;
+/**
+ * Printed by a code-mode insert once its cells are up. The insert's success
+ * is decided by this line rather than by the kernel's own success flag: a
+ * scaffold full of blanks raises as soon as marimo runs it, which is the
+ * scaffold working, not the notebook failing.
+ */
+const BOX_IS_UP = "__pair_notebook_box_is_up__";
+
 /** (cell, code) pairs already reported, so one pass is one turn. */
 const passReported = new Set<string>();
 /** True while the tutor is mid-turn: the watcher does not poll over a turn. */
@@ -6356,6 +6364,11 @@ export default function (pi: ExtensionAPI) {
           `    _names = [c.name for c in ctx.cells]\n` +
           `    if ${py(name + "_work")} in _names:\n` +
           `        print("exercise already in the notebook — skipped duplicate insert")\n` +
+          // The box is up here too — it was up before this call. Said in both
+          // branches because any cell in the notebook that happens to be in
+          // an error state makes the kernel call itself report unsuccessful,
+          // and a resumed session is full of work cells with blanks in them.
+          `        print(${py(BOX_IS_UP)})\n` +
           `    else:\n` +
           `        _cid = ctx.create_cell(${py(briefBody)}, name=${py(name + "_brief")}, hide_code=True)\n` +
           `        ctx.run_cell(_cid)\n` +
@@ -6364,12 +6377,41 @@ export default function (pi: ExtensionAPI) {
           `        _cid = ctx.create_cell(${py(String(params.scaffold ?? ""))}, name=${py(name + "_work")}, hide_code=False, after=_cid)\n` +
           `        ctx.run_cell(_cid)\n` +
           handIn;
+        // Printed once the cells are up. What it is for is at the failure
+        // check below.
+        codeModeCode += `        print(${py(BOX_IS_UP)})\n`;
         codeModeCode += focusCellCode("_first", "        ");
         // Clear the desk before the new work lands: every finished
         // checkpoint folds to a line, and the page the student scrolls is
         // the exercise in hand with an index of their own work above it.
         await foldFinishedCheckpoints(name, signal);
         const cmResult = await runKernel(codeModeCode, signal);
+        // ── A raising scaffold is not a broken notebook ────────────────────
+        // marimo runs a cell the moment it exists, and a scaffold is a cell
+        // with BLANKS in it: m03's `___` refuses with "___ is a blank:
+        // replace it with your answer, then run the cell again". So the
+        // kernel reports the run as unsuccessful and the INSERT looked like a
+        // notebook error — the student got "⚠ something hiccuped", and the
+        // RECOVERY line then put a notebook with nothing wrong with it into
+        // terminal-only mode for the rest of the session. It happened twice
+        // in one day before anyone could see why.
+        //
+        // So the sentinel decides whether the box is up, not the traceback.
+        // The traceback still goes to the tutor, with a line saying what it
+        // is: the student is about to meet the same message when they run
+        // the cell themselves, and it is the scaffold working as designed.
+        if (cmResult.out.includes(BOX_IS_UP)) {
+          cmResult.failed = false;
+          cmResult.reason = undefined;
+          cmResult.out = cmResult.out.replace(BOX_IS_UP, "").trimStart();
+          if (/Traceback/.test(cmResult.out)) {
+            cmResult.out =
+              `(The traceback below is the scaffold's own blanks refusing to run — ` +
+              `expected, the student sees the same message, and it goes when they fill ` +
+              `them in. The box is up. Say nothing about it and do not retry.)\n` +
+              cmResult.out;
+          }
+        }
         // From here until the checkpoint closes, the watcher is looking at
         // this one cell and no other.
         if (!cmResult.failed && wakesOnPass()) liveWorkCell = `${name}_work`;
