@@ -227,6 +227,14 @@ moving to code mode has to deal with three things:
   notebook, not in a cell.
 - **A real cell has no `.value`.** `nb_read` cannot reach it, which is what
   `nb_read_code` is for, and what the `_work` suffix tells the signal watcher.
+- **A finished checkpoint folds itself away.** A real notebook grows, and by
+  cp7 the exercise in hand sits under six solved ones. So as each new
+  exercise lands, every earlier checkpoint collapses to a line the student
+  can click open: the brief and the note become a `mo.accordion` labelled
+  with their own heading, the work cell's code folds (`hide_code`), and the
+  dead Submit button is deleted. Nothing is lost and nothing is reworded —
+  the prose goes inside the fold verbatim, and the code the grader reads is
+  untouched in `notebook.py`.
 
 ## What a module folder must provide
 

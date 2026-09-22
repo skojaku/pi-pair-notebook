@@ -3091,6 +3091,109 @@ async function pinAppealToBottom(signal?: AbortSignal): Promise<void> {
   }
 }
 
+/**
+ * Fold every FINISHED checkpoint down to a line the student can click open.
+ *
+ * A code-mode module is a REAL notebook, and a real notebook grows: by cp7
+ * the exercise in hand sits under six finished ones, each still carrying its
+ * full brief, its scaffold, a dead Submit button and a note cell. A student
+ * who has to scroll past four screens of their own solved work to find the
+ * blank they are filling is reading the wrong thing, and every line of it is
+ * something to be distracted by.
+ *
+ * So the desk is cleared as new work arrives. For every checkpoint but the
+ * one being built:
+ *
+ *   <id>_brief   rewritten as `mo.accordion({…})` — one line, click to open
+ *   <id>_note    the same
+ *   <id>_work    `hide_code` — marimo's own fold, one click from their code
+ *   <id>_send    deleted; a finished checkpoint's Submit button does nothing
+ *   <id>_sent    deleted with it — it is the button's own caption
+ *
+ * NOTHING IS LOST AND NOTHING IS REWRITTEN. The brief's own words go inside
+ * the fold verbatim (`ast.get_source_segment`, so the `r"""` prefix marimo's
+ * serialiser copies survives with them), the student's code is untouched in
+ * the file that gets graded, and every fold opens with one click. The label
+ * is the brief's or the note's own heading, so a folded checkpoint still
+ * says which one it is.
+ *
+ * Code mode only. An app-view module's exercise is a `code_editor` widget in
+ * an `_ed`/`_out` pair whose value does not survive being folded, and m01
+ * and m02 are app view.
+ *
+ * Cosmetic, like pinAppealToBottom: a failure here never blocks an insert.
+ */
+async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Promise<void> {
+  if (moduleView() !== "code") return;
+  try {
+    await runKernel(
+      `import ast\n` +
+        `import marimo._code_mode as cm\n` +
+        `async with cm.get_context() as ctx:\n` +
+        // Reading .code is also what clears the read-before-write guard, the
+        // same line nb_edit_cell needs before it may replace a body.
+        `    _src = {c.name: c.code for c in ctx.cells if c.name and c.name != "_"}\n` +
+        `    _open = {c.name for c in ctx.cells if c.name and not c.config.hide_code}\n` +
+        `    _keep = ${py(keep)}\n` +
+        `    _done = []\n` +
+        `    _show = []\n` +
+        `    for _name, _code in _src.items():\n` +
+        `        _base, _, _kind = _name.rpartition("_")\n` +
+        `        if not _base or _base == _keep or (_base + "_work") not in _src:\n` +
+        `            continue\n` +
+        `        if _kind in ("send", "sent"):\n` +
+        `            ctx.delete_cell(_name)\n` +
+        `            _done.append(_name)\n` +
+        `        elif _kind == "work" and _name in _open:\n` +
+        // Config only, no code: the guard that can refuse a body never runs.
+        // Folding an already-folded cell is a write to the file for nothing,
+        // and every write is a line in the student's git history.
+        `            ctx.edit_cell(_name, hide_code=True)\n` +
+        `            _done.append(_name)\n` +
+        `        elif _kind in ("brief", "note") and "mo.accordion(" not in _code:\n` +
+        `            try:\n` +
+        `                _arg = ast.parse(_code, mode="eval").body.args[0]\n` +
+        `                _text = ast.literal_eval(_arg)\n` +
+        `                _seg = ast.get_source_segment(_code, _arg)\n` +
+        `            except Exception:\n` +
+        `                continue\n` +
+        `            if not _seg:\n` +
+        `                continue\n` +
+        // The heading the cell already carries — "### Exercise: a network in
+        // nine pairs", "### 📐 Where the seven came from". A fold with a
+        // label of its own invents a second name for the same checkpoint.
+        `            _head = ""\n` +
+        `            for _line in _text.splitlines():\n` +
+        `                if _line.lstrip().startswith("#"):\n` +
+        `                    _head = _line.lstrip().lstrip("#").strip()\n` +
+        `                    break\n` +
+        `            if not _head:\n` +
+        `                continue\n` +
+        `            if _kind == "brief":\n` +
+        `                _head = "\\u2705 " + _head\n` +
+        // A note heading often opens with an emoji of its own. Two in a row
+        // is a label that reads as decoration before it reads as a name.
+        `            elif _head[:1].isascii():\n` +
+        `                _head = "\\U0001F4DD " + _head\n` +
+        `            ctx.edit_cell(_name, "mo.accordion({%r: mo.md(%s)})" % (_head, _seg))\n` +
+        `            _done.append(_name)\n` +
+        `            _show.append(_name)\n` +
+        `    print("folded:", ", ".join(_done) if _done else "nothing to fold")\n` +
+        // The re-run goes in a SECOND context, and that is not tidiness. A
+        // run queued beside its own edit executes the new body against the
+        // graph the OLD one had: every folded cell came back saying the
+        // name mo is not defined, on screen, in a notebook whose cells were
+        // all correct. Let the first batch land, then run.
+        `async with cm.get_context() as ctx:\n` +
+        `    for _name in _show:\n` +
+        `        ctx.run_cell(_name)\n`,
+      signal,
+    );
+  } catch {
+    /* cosmetic — never let folding block an exercise */
+  }
+}
+
 /** The closing record + summary are DERIVED from the log, never retyped. */
 function buildSessionRecord(entries: any[]): string {
   const cps = entries.filter((e) => e?.type === "checkpoint" && e.id);
@@ -6018,6 +6121,10 @@ export default function (pi: ExtensionAPI) {
           `        _cid = ctx.create_cell(${py(sentCellBody)}, name=${py(name + "_sent")}, hide_code=True, after=_cid)\n` +
           `        ctx.run_cell(_cid)\n`;
         codeModeCode += focusCellCode("_first", "        ");
+        // Clear the desk before the new work lands: every finished
+        // checkpoint folds to a line, and the page the student scrolls is
+        // the exercise in hand with an index of their own work above it.
+        await foldFinishedCheckpoints(name, signal);
         const cmResult = await runKernel(codeModeCode, signal);
         if (!cmResult.failed) await pinAppealToBottom(signal);
         if (!cmResult.failed) {
