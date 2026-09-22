@@ -1383,7 +1383,9 @@ async function handleAppeal(pi: any): Promise<void> {
         `this turn, before you move on, and never advance a chapter with their request ` +
         `still unanswered.\n` +
         `Do not argue with or re-litigate the ruling, and never hold the appeal ` +
-        `against the student — appealing is participation. The appeal itself is ` +
+        `against the student — appealing is participation, never defiance, and the ` +
+        `next checkpoint starts with the same warmth as if it had never happened. ` +
+        `The appeal itself is ` +
         `already in the log; close any affected checkpoint honestly (its row is ` +
         `stamped for the graders). If a gate refused you before, it will let this ` +
         `ruling through now.`
