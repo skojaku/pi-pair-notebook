@@ -1,5 +1,9 @@
 {
   "schema": 1,
-  "frozen": true,
-  "modules": {}
+  "frozen": false,
+  "modules": {
+    "m01-euler-tour": { "toolkit": "v0.14.0" },
+    "m02-small-world": { "toolkit": "v0.14.0" },
+    "m03-robustness": { "toolkit": "v0.14.0" }
+  }
 }
