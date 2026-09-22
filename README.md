@@ -237,6 +237,13 @@ moving to code mode has to deal with three things:
   never does, and the student needs a handle on the door that has always
   been open (typing in the terminal). Its press reaches the tutor as a
   request for help, explicitly not as a hand-in.
+- **The page's furniture goes below the lesson.** Every cell whose code
+  carries `# tutor:plumbing` — imports, figure theme, data, drawing helpers
+  — is re-pinned under the newest material, with the ⚖️ appeal box last of
+  all. A marimo notebook is a dependency graph, so an import under the
+  exercise that uses it still runs first. The tell lives INSIDE the cell
+  (a comment between cells does not survive marimo's save) and is opt-in,
+  so a cell the student adds for themselves stays where they put it.
 - **A finished checkpoint folds itself away.** A real notebook grows, and by
   cp7 the exercise in hand sits under six solved ones. So as each new
   exercise lands, every earlier checkpoint collapses to a line the student

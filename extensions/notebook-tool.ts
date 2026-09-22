@@ -2109,7 +2109,7 @@ async function insertChapterHeader(
         focusCellCode("_cid", "        "),
       signal,
     );
-    await pinAppealToBottom(signal);
+    await pinFurnitureToBottom(signal);
     return true;
   } catch {
     // headers are cosmetic — never block the lesson
@@ -3126,28 +3126,50 @@ async function insertMarkdownCell(
       focusCellCode("_cid", "        "),
     signal,
   );
-  if (!r.failed) await pinAppealToBottom(signal);
+  if (!r.failed) await pinFurnitureToBottom(signal);
   return r;
 }
 
 /**
- * Keep the ⚖️ "Tutor gets stuck" box the LAST thing on the page: every
- * insert lands above it, so the student always finds the appeal box at the
- * bottom, right under the newest material. The box's two cells are
- * anonymous on purpose (nb_fresh_start's wipe deletes every NAMED cell),
- * so they are found by their code instead of a name. Moves are visual only
- * — no cell re-executes. Purely cosmetic: a failure never blocks an insert.
+ * Keep the page's furniture BELOW the lesson: every insert lands above the
+ * notebook's plumbing, and the ⚖️ "Tutor gets stuck" box stays the last
+ * thing of all.
+ *
+ * Two kinds of cell are moved, both found by a tell in their own code
+ * rather than by a name (nb_fresh_start's wipe deletes every NAMED cell,
+ * so the furniture is anonymous on purpose):
+ *
+ *   `# tutor:plumbing`   the module's imports, figure theme, data and
+ *                        drawing helpers — machinery, never the lesson
+ *   `tutor_stuck_send`   the appeal box, last of all
+ *
+ * A notebook is a dependency graph, so where a cell SITS has nothing to do
+ * with when it runs: imports can live under the exercise that uses them
+ * and still run first. The tell is opt-in rather than "everything without
+ * a name" because a student may add a cell of their own, and sweeping it
+ * to the bottom of their own notebook would be someone else moving their
+ * work.
+ *
+ * Moves are visual only — no cell re-executes. Purely cosmetic: a failure
+ * never blocks an insert.
  */
-async function pinAppealToBottom(signal?: AbortSignal): Promise<void> {
+async function pinFurnitureToBottom(signal?: AbortSignal): Promise<void> {
   try {
     await runKernel(
       `import marimo._code_mode as cm\n` +
         `async with cm.get_context() as ctx:\n` +
-        `    _app = [c.id for c in ctx.cells if "tutor_stuck_send" in c.code]\n` +
         `    _ids = [c.id for c in ctx.cells]\n` +
-        `    if len(_app) == 2 and _ids[-2:] != _app:\n` +
-        `        ctx.move_cell(_app[0], after=_ids[-1])\n` +
-        `        ctx.move_cell(_app[1], after=_app[0])\n` +
+        `    _plumb = [c.id for c in ctx.cells if "tutor:plumbing" in c.code]\n` +
+        `    _app = [c.id for c in ctx.cells if "tutor_stuck_send" in c.code]\n` +
+        `    _tail = [i for i in _plumb if i not in _app] + _app\n` +
+        `    _rest = [i for i in _ids if i not in _tail]\n` +
+        // Nothing above the furniture means nothing to do — and it also
+        // means _rest[-1] does not exist to move the block after.
+        `    if _tail and _rest and _ids != _rest + _tail:\n` +
+        `        _prev = _rest[-1]\n` +
+        `        for _i in _tail:\n` +
+        `            ctx.move_cell(_i, after=_prev)\n` +
+        `            _prev = _i\n` +
         `    print("ok")\n`,
       signal,
     );
@@ -6057,7 +6079,7 @@ export default function (pi: ExtensionAPI) {
             `quote loses a clause or tidies their punctuation, and both have happened. ` +
             `Build the aside itself.`;
         }
-        await pinAppealToBottom(signal);
+        await pinFurnitureToBottom(signal);
         if (name !== wanted) {
           addCellResult.out +=
             `\nNAMED "${name}" — "${wanted}" is not a usable cell name (marimo needs a ` +
@@ -6351,7 +6373,7 @@ export default function (pi: ExtensionAPI) {
         // From here until the checkpoint closes, the watcher is looking at
         // this one cell and no other.
         if (!cmResult.failed && wakesOnPass()) liveWorkCell = `${name}_work`;
-        if (!cmResult.failed) await pinAppealToBottom(signal);
+        if (!cmResult.failed) await pinFurnitureToBottom(signal);
         if (!cmResult.failed) {
           cmResult.out =
             (wakesOnPass()
@@ -6402,7 +6424,7 @@ export default function (pi: ExtensionAPI) {
         `        ctx.run_cell(_cid)\n`;
       code += focusCellCode("_first", "        ");
       const result = await runKernel(code, signal);
-      if (!result.failed) await pinAppealToBottom(signal);
+      if (!result.failed) await pinFurnitureToBottom(signal);
       if (!result.failed) {
         result.out =
           `Exercise inserted. The student sees your instructions, a runnable code box, a ` +
@@ -6522,7 +6544,7 @@ export default function (pi: ExtensionAPI) {
       }
       code += focusCellCode("_first", "        ");
       const result = await runKernel(code, signal);
-      if (!result.failed) await pinAppealToBottom(signal);
+      if (!result.failed) await pinFurnitureToBottom(signal);
       if (!result.failed && describe) {
         // Upload widgets are named per template (cp4_photo, cp2_paperwork_photo,
         // cp5_ring_paperwork_photo…). The tutor cannot know which one it just
@@ -6734,7 +6756,7 @@ export default function (pi: ExtensionAPI) {
         // header is cosmetic
       }
       const result = await runKernel(code, signal);
-      if (!result.failed) await pinAppealToBottom(signal);
+      if (!result.failed) await pinFurnitureToBottom(signal);
       if (!result.failed) {
         result.out =
           `Fresh start complete. The Chapter 1 script arrives next — END YOUR TURN NOW ` +
@@ -7100,7 +7122,7 @@ export default function (pi: ExtensionAPI) {
         `    print("B64:" + _b64.b64encode(_out.getvalue()).decode())\n`;
       const result = await runKernel(code, signal);
       if (result.failed) return toResult(result);
-      await pinAppealToBottom(signal);
+      await pinFurnitureToBottom(signal);
       if (result.out.includes("NO_IMAGE")) {
         return toResult({
           out:
