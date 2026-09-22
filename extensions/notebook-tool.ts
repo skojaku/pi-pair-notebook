@@ -62,6 +62,7 @@ import {
   stripModelQuoteLines,
   withQuotedQuestion,
 } from "./lib/verbatim.ts";
+import { syncSkills } from "./lib/skills.ts";
 import {
   kernelRefusal,
   py,
@@ -235,6 +236,28 @@ const RUNNING_TAG: string | null = (() => {
     return null;
   }
 })();
+
+/**
+ * Where a skill sync went, for the review harness and for an instructor asking
+ * why a student's tutor has not heard of a rule that shipped last week.
+ *
+ * Beside the channel markers because it answers the same question — "did this
+ * student's machine actually take the update?" — and because that directory is
+ * already the one place outside the module folder this package writes to.
+ * Overwritten each session: the interesting state is the current one, and an
+ * append-only file in a home directory is a thing nobody ever truncates.
+ */
+function writeSkillSyncReport(report: unknown): void {
+  try {
+    fs.mkdirSync(CHANNEL_MARKERS, { recursive: true });
+    fs.writeFileSync(
+      path.join(CHANNEL_MARKERS, "skills-sync.json"),
+      JSON.stringify({ at: new Date().toISOString(), ...(report as object) }, null, 2),
+    );
+  } catch {
+    /* a report we cannot write is not worth a failed session */
+  }
+}
 
 function markChannel(kind: "loaded" | "healthy"): void {
   if (!RUNNING_TAG) return;
@@ -3735,6 +3758,29 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     lastCtx = _ctx ?? lastCtx;
+    // ── The skills this package ships ────────────────────────────────────
+    // Outside the chapter try/catch below, and before it: this must not be
+    // able to fail a session, and the channel's health marker must not be
+    // able to certify a release on the strength of it.
+    //
+    // Skills used to be written only by setup-pi.mjs, which runs once, before
+    // pi exists. So a skill added or reworded after a student's setup day
+    // reached nobody — the channel had already put the new file on their
+    // disk, and the last twenty centimetres into ~/.pi/agent/skills was a
+    // step nothing took. This is that step. It lands on their NEXT launch,
+    // because pi has read the skills directory before any extension runs.
+    try {
+      // Silent. The student's terminal carries the lesson and nothing else,
+      // and there is no action for them in any outcome here. The report goes
+      // where the review harness and a puzzled instructor can find it.
+      const report = syncSkills(
+        path.join(EXT_DIR, "..", "skills"),
+        path.join(os.homedir(), ".pi", "agent", "skills"),
+      );
+      writeSkillSyncReport(report);
+    } catch {
+      /* A tutor with one less skill, never a session that will not start. */
+    }
     // ── Where the notebook is ────────────────────────────────────────────
     // HERE, and not inside marimoUrl's own then-block, on purpose: an
     // externally supplied server (the review harness pins one, and an

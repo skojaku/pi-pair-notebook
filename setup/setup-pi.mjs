@@ -382,6 +382,11 @@ try {
     fs.writeFileSync(quizTarget, quizMd);
     ok("your assistant can make a quiz from the lecture notes");
   }
+  // The marker the extension's skill sync reads as "this one is ours, keep it
+  // in step" (extensions/lib/skills.ts). Written on both paths, `quizSame`
+  // included: a student who re-runs setup must end up adoptable too, and
+  // without it the sync meets its own file and treats it as a stranger's.
+  fs.writeFileSync(path.join(QUIZ_DIR, ".owned-by-pair-notebook"), "");
 } catch (e) {
   warn(`could not write the lecture-quiz skill (${e.message}).`);
 }
