@@ -22,6 +22,8 @@ import {
   scanKernelCode,
   stripRedundantImports,
   workCellFor,
+  cellSource,
+  cellNames,
 } from "../extensions/lib/pysrc.ts";
 
 const HAVE_PY = spawnSync("python3", ["-c", "pass"]).status === 0;
@@ -418,5 +420,95 @@ describe("pickNotebookSession", () => {
       pickNotebookSession({ s: { path: WANT.replace("/pair-notebook/", "//pair-notebook//") } }, ["s"], WANT, CWD),
       "s",
     );
+  });
+});
+
+describe("cellSource", () => {
+  // The shape marimo 0.24 saved in a live session, byte for byte: a scaffold
+  // that came back with a stray backslash before its first comment.
+  const NB = [
+    "import marimo",
+    "app = marimo.App()",
+    "",
+    "@app.cell(hide_code=True)",
+    "def cp1_build_brief(mo):",
+    '    mo.md(r"""### Exercise""")',
+    "    return",
+    "",
+    "",
+    "app._unparsable_cell(",
+    '    r"""',
+    "",
+    "    \\# 1. Nine pairs of node indices.",
+    "    edge_list = [(0, 1), (0, 2)]",
+    "",
+    "    g = ig.Graph(___)",
+    '    """,',
+    '    name="cp1_build_work"',
+    ")",
+    "",
+    "",
+    "@app.cell",
+    "def cp2_edit_work(g):",
+    "    edited = g.copy()",
+    "    return (edited,)",
+    "",
+    "",
+    "@app.cell",
+    "def _():",
+    "    return",
+    "",
+    'if __name__ == "__main__":',
+    "    app.run()",
+  ].join("\n");
+
+  test("a cell that parses: code only, marimo's def and return gone", () => {
+    assert.deepEqual(cellSource(NB, "cp2_edit_work"), { code: "edited = g.copy()", parses: true });
+  });
+
+  test("a cell with a syntax error is still found, and says so", () => {
+    const c = cellSource(NB, "cp1_build_work");
+    assert.ok(c);
+    assert.equal(c.parses, false);
+    // Line 2 is the bad one, as in the student's own error message.
+    assert.equal(c.code.split("\n")[0], "");
+    assert.equal(c.code.split("\n")[1], "\\# 1. Nine pairs of node indices.");
+    assert.equal(c.code.split("\n").at(-1), "g = ig.Graph(___)");
+  });
+
+  test("code holding a triple quote comes back unescaped", () => {
+    // marimo 0.24 writes an ordinary (not raw) literal for such a cell.
+    const nb = [
+      "app._unparsable_cell(",
+      '    """',
+      '    msg = \\"\\"\\"not closed',
+      '    """,',
+      '    name="cp3_x_work"',
+      ")",
+    ].join("\n");
+    assert.deepEqual(cellSource(nb, "cp3_x_work"), { code: 'msg = """not closed', parses: false });
+  });
+
+  test("a name that is not there is null", () => {
+    assert.equal(cellSource(NB, "cp9_nothing_work"), null);
+    assert.equal(cellSource(NB, "not a name"), null);
+  });
+
+  test("cellNames lists both kinds, and never the anonymous ones", () => {
+    assert.deepEqual(cellNames(NB), ["cp1_build_brief", "cp1_build_work", "cp2_edit_work"]);
+  });
+
+  test("workCellFor sees a work cell with a syntax error", () => {
+    assert.equal(workCellFor(NB, "cp1_build"), "cp1_build_work");
+  });
+
+  test("the code python sees has the error on the line the student was told", { skip: !HAVE_PY }, () => {
+    const c = cellSource(NB, "cp1_build_work");
+    const r = spawnSync(
+      "python3",
+      ["-c", "import sys\ntry:\n compile(sys.stdin.read(),'<cell>','exec')\nexcept SyntaxError as e:\n print(e.lineno)"],
+      { input: c!.code, encoding: "utf-8" },
+    );
+    assert.equal(r.stdout.trim(), "2");
   });
 });

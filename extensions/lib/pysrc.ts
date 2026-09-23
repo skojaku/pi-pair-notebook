@@ -368,9 +368,114 @@ export function kernelRefusal(hits: string[]): string {
 export function workCellFor(notebookSrc: string, checkpointId: string | null): string | null {
   if (!checkpointId || !/^[A-Za-z_]\w*$/.test(checkpointId)) return null;
   const cell = `${checkpointId}_work`;
-  // Column zero: a `def <name>_work(` indented inside another cell's body is
-  // the student's own helper function, not the cell marimo named.
-  return new RegExp(`^def ${cell}\\(`, "m").test(notebookSrc) ? cell : null;
+  return cellSource(notebookSrc, cell) ? cell : null;
+}
+
+/** One named cell of a marimo notebook file, as the student sees it. */
+export interface CellSource {
+  /** The cell's code, dedented, with marimo's own def/return lines removed. */
+  code: string;
+  /**
+   * False when marimo saved the cell as `app._unparsable_cell(...)`: Python
+   * rejected it, so it never ran and has no output of its own.
+   */
+  parses: boolean;
+}
+
+/**
+ * Find a named cell in the notebook file, whether or not it parses.
+ *
+ * marimo saves a cell that parses as `@app.cell` + `def <name>(` at column
+ * zero. A cell with a syntax error cannot be a function body, so it is saved
+ * as a string instead:
+ *
+ *     app._unparsable_cell(
+ *         r"""
+ *         <the code, indented four spaces>
+ *         """,
+ *         name="cp1_build_work"
+ *     )
+ *
+ * Looking only for the `def` made a student's cell vanish the moment it had a
+ * syntax error — exactly when they most needed the tutor to look at it. The
+ * tutor was told "No cell named 'cp1_build_work'" and could only ask the
+ * student to read the red message aloud.
+ *
+ * Column zero for the `def`: one indented inside another cell's body is the
+ * student's own helper function, not the cell marimo named.
+ */
+export function cellSource(notebookSrc: string, cell: string): CellSource | null {
+  if (!/^[A-Za-z_]\w*$/.test(cell)) return null;
+  const lines = notebookSrc.split("\n");
+  const isCellEnd = (l: string) =>
+    /^@app\.(cell|function)/.test(l) || /^app\._unparsable_cell\(/.test(l) || /^if __name__/.test(l);
+  const dedent = (l: string) => (l.startsWith("    ") ? l.slice(4) : l);
+
+  const start = lines.findIndex((l) => new RegExp(`^def ${cell}\\(`).test(l));
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (isCellEnd(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    // Drop marimo's own bookkeeping: the def line, the trailing `return`
+    // tuple it generates, and the blank lines around both.
+    const kept: string[] = [];
+    for (const l of lines.slice(start + 1, end)) {
+      if (/^\s{4}return(\s*$|\s|\()/.test(l)) continue;
+      kept.push(dedent(l));
+    }
+    while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
+    while (kept.length && !kept[0].trim()) kept.shift();
+    return { code: kept.join("\n"), parses: true };
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^app\._unparsable_cell\(/.test(lines[i])) continue;
+    let close = lines.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\)/.test(lines[j])) {
+        close = j;
+        break;
+      }
+    }
+    const block = lines.slice(i + 1, close);
+    if (!block.some((l) => l.trim() === `name=${JSON.stringify(cell)}`)) continue;
+    // The literal opens on its own line (`r"""` or `"""`) and closes on a
+    // line that is just `""",`. Everything between is the code, indented.
+    const open = block.findIndex((l) => /^\s*r?"""\s*$/.test(l));
+    const shut = block.findIndex((l, k) => k > open && /^\s*""",?\s*$/.test(l));
+    if (open < 0 || shut < 0) return { code: "", parses: false };
+    // Line numbers must match the ones in the student's error message, so a
+    // leading blank line is kept; trailing ones are not code.
+    // Raw (`r"""`) unless the code itself holds a `"""`; then marimo writes
+    // an ordinary literal and escapes quotes and backslashes in it.
+    const raw = /^\s*r"""/.test(block[open]);
+    const code = block
+      .slice(open + 1, shut)
+      .map(dedent)
+      .map((l) => (raw ? l : l.replace(/\\(["\\])/g, "$1")));
+    while (code.length && !code[code.length - 1].trim()) code.pop();
+    return { code: code.join("\n"), parses: false };
+  }
+  return null;
+}
+
+/** Every named cell in the file, parsing or not, in order. */
+export function cellNames(notebookSrc: string): string[] {
+  const names: string[] = [];
+  let inUnparsable = false;
+  for (const l of notebookSrc.split("\n")) {
+    if (/^app\._unparsable_cell\(/.test(l)) inUnparsable = true;
+    else if (inUnparsable && /^\)/.test(l)) inUnparsable = false;
+    const name = inUnparsable
+      ? /^\s*name="(\w+)"\s*$/.exec(l)?.[1]
+      : /^def (\w+)\(/.exec(l)?.[1];
+    if (name && name !== "_") names.push(name);
+  }
+  return names;
 }
 
 /**

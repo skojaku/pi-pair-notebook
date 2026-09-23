@@ -73,6 +73,8 @@ import {
   stripRedundantImports,
   pickNotebookSession,
   workCellFor,
+  cellSource,
+  cellNames,
 } from "./lib/pysrc.ts";
 import {
   chooseNotebook,
@@ -7168,6 +7170,23 @@ export default function (pi: ExtensionAPI) {
     ...quiet("Having a look at your notebook…"),
   });
 
+  // `line N: <message>` for code Python will not compile, or null when it
+  // compiles or no interpreter is on the PATH. compile() only: nothing runs.
+  const pythonSyntaxError = (code: string): string | null => {
+    const script =
+      "import sys\n" +
+      "try:\n" +
+      "    compile(sys.stdin.read(), '<cell>', 'exec')\n" +
+      "except SyntaxError as e:\n" +
+      "    print(f'line {e.lineno}: {type(e).__name__}: {e.msg}')\n";
+    for (const exe of ["python3", "python"]) {
+      const r = spawnSync(exe, ["-c", script], { input: code, encoding: "utf-8", timeout: 5000 });
+      if (r.error || r.status !== 0) continue;
+      return r.stdout.trim() || null;
+    }
+    return null;
+  };
+
   // ── nb_read_code ──────────────────────────────────────────────────────────
   // Code mode's counterpart to nb_read. A code_editor widget has a .value the
   // kernel can hand over; a REAL marimo cell has nothing of the sort — its
@@ -7185,7 +7204,8 @@ export default function (pi: ExtensionAPI) {
       "Read the CODE a student wrote in one of their own notebook cells. Give the cell " +
       "name, e.g. 'cp1_build_work'. This is how you read their work in a code-mode module: " +
       "their cell is a real marimo cell, it has no .value, and nb_read cannot reach it. " +
-      "Returns the source as they last ran it.",
+      "Returns the source as they last ran it. A cell with a syntax error is still " +
+      "found: the result says so, gives Python's message, and numbers the lines.",
     promptSnippet: "Read the source of a student's own notebook cell (code mode)",
     parameters: Type.Object({
       status: STATUS_PARAM,
@@ -7202,12 +7222,9 @@ export default function (pi: ExtensionAPI) {
       } catch {
         return toResult({ out: "Could not read notebook.py.", failed: true });
       }
-      const lines = source.split("\n");
-      const start = lines.findIndex((l) => new RegExp(`^def ${cell}\\(`).test(l));
-      if (start < 0) {
-        const names = lines
-          .map((l) => /^def (\w+)\(/.exec(l)?.[1])
-          .filter((n): n is string => Boolean(n) && n !== "_");
+      const found = cellSource(source, cell);
+      if (!found) {
+        const names = cellNames(source);
         return toResult({
           out:
             `No cell named '${cell}' in notebook.py. Take the name from the build line ` +
@@ -7216,25 +7233,24 @@ export default function (pi: ExtensionAPI) {
           failed: true,
         });
       }
-      let end = lines.length;
-      for (let i = start + 1; i < lines.length; i++) {
-        if (/^@app\.(cell|function)/.test(lines[i]) || /^if __name__/.test(lines[i])) {
-          end = i;
-          break;
-        }
+      if (found.parses) {
+        return toResult({
+          out: `${cell}, as they last ran it:\n\n${found.code}`,
+          failed: false,
+        });
       }
-      // Drop marimo's own bookkeeping: the def line, the trailing `return`
-      // tuple it generates, and the blank lines around both. What is left is
-      // what the student sees in the cell.
-      const kept: string[] = [];
-      for (const l of lines.slice(start + 1, end)) {
-        if (/^\s{4}return(\s*$|\s|\()/.test(l)) continue;
-        kept.push(l.startsWith("    ") ? l.slice(4) : l);
-      }
-      while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
-      while (kept.length && !kept[0].trim()) kept.shift();
+      // A syntax error: marimo could not make the cell a function, so it never
+      // ran and there is no output to read. Ask Python what it objects to, so
+      // the tutor can point at the line instead of asking the student to read
+      // the red message aloud.
+      const why = pythonSyntaxError(found.code);
       return toResult({
-        out: `${cell}, as they last ran it:\n\n${kept.join("\n")}`,
+        out:
+          `${cell} has a SYNTAX ERROR, so it never ran — Python rejects it before ` +
+          `the first line executes.\n` +
+          (why ? `Python says: ${why}\n` : "") +
+          `Line numbers count from the top of the cell, as the student sees it.\n\n` +
+          found.code.split("\n").map((l, k) => `${String(k + 1).padStart(3)}  ${l}`).join("\n"),
         failed: false,
       });
     },
