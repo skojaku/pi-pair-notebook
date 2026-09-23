@@ -372,3 +372,55 @@ export function workCellFor(notebookSrc: string, checkpointId: string | null): s
   // the student's own helper function, not the cell marimo named.
   return new RegExp(`^def ${cell}\\(`, "m").test(notebookSrc) ? cell : null;
 }
+
+/**
+ * What replaces the 🆘 box the moment the bench says Pass.
+ *
+ * Two faults, one cell. The 🆘 "I'm stuck — ask my tutor" button is the way
+ * OUT of a cell that will not go; once the cell has gone it offers help with
+ * a problem the student has just solved, and it is the one control left on
+ * the page that writes to the tutor, so a stray press after a pass arrives as
+ * a second hand-in on work already handed in.
+ *
+ * And taking it away on its own leaves the page silent at exactly the moment
+ * the student needs to be told something. In a code-mode module their eyes
+ * are on the notebook; the tutor speaks in the terminal. Green cell, nothing
+ * else, no reason to look anywhere — so they sit there while the tutor talks
+ * to an empty room. The button's caption used to carry that news ("your tutor
+ * sees it as soon as it passes") and it goes with the button.
+ *
+ * So: delete both help cells, and put one line where they were, under their
+ * own work, which is where their eyes already are.
+ *
+ * `_helped` before `_help`: the second reads the button the first defines,
+ * and removing a definition out from under its reader is how a notebook ends
+ * up showing a NameError where a student's work used to be.
+ *
+ * The line is written to be true on a COLD read. This cell is in the keepsake
+ * a grader opens in March, and "your tutor is reading this right now" is a
+ * sentence that stops being true about ninety seconds after it is written.
+ *
+ * Silent about cells that are not there, and it never writes the line twice:
+ * this runs on every pass, including one restored from an earlier sitting
+ * where the box has long gone.
+ */
+export function handedInCode(workCell: string): string {
+  const base = workCell.replace(/_work$/, "");
+  const body =
+    'mo.md("✅ **Passed — handed in.** Your tutor answers in the terminal.")';
+  return (
+    `import marimo._code_mode as cm\n` +
+    `async with cm.get_context() as ctx:\n` +
+    `    _names = [c.name for c in ctx.cells]\n` +
+    // Found before the deletes, so the anchor cannot be read out of a
+    // collection that has just been mutated underneath it.
+    `    _w = [c for c in ctx.cells if c.name == ${py(workCell)}]\n` +
+    `    for _n in ${pyList([`${base}_helped`, `${base}_help`])}:\n` +
+    `        if _n in _names:\n` +
+    `            ctx.delete_cell(_n)\n` +
+    `    if ${py(base + "_handed")} not in _names and _w:\n` +
+    `        _cid = ctx.create_cell(${py(body)}, name=${py(base + "_handed")}, ` +
+    `hide_code=True, after=_w[0].id)\n` +
+    `        ctx.run_cell(_cid)\n`
+  );
+}

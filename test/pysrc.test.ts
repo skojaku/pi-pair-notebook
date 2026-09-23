@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
 import {
+  handedInCode,
   kernelRefusal,
   py,
   pyList,
@@ -345,5 +346,63 @@ describe("workCellFor", () => {
     const nb = "@app.cell\ndef cp1_build_extra_work(check_build):\n    return\n";
     assert.equal(workCellFor(nb, "cp1_build_extra"), "cp1_build_extra_work");
     assert.equal(workCellFor(nb, "cp1_build"), null);
+  });
+});
+
+/**
+ * What the page says the moment the bench passes.
+ *
+ * Two faults met here. The 🆘 button is the way out of a cell that will not
+ * go, and it was still sitting under cells that had gone — offering help with
+ * a solved problem, and leaving one control on the page that writes to the
+ * tutor, so a stray press read as a second hand-in. And taking it away alone
+ * left the page silent exactly when the student needed telling where to look:
+ * their eyes are on the notebook, the tutor talks in the terminal, and a green
+ * cell with nothing under it gives them no reason to turn their head.
+ */
+describe("handedInCode", () => {
+  const code = handedInCode("cp1_build_work");
+
+  test("both help cells go, the reader before the button it reads", () => {
+    // `_helped` references the button `_help` defines. Deleting the definition
+    // first leaves a NameError where the student's work used to be.
+    assert.ok(code.includes('["cp1_build_helped","cp1_build_help"]'));
+    assert.ok(code.includes("ctx.delete_cell(_n)"));
+  });
+
+  test("a line takes their place, under the student's own cell", () => {
+    assert.match(code, /name="cp1_build_handed"/);
+    assert.match(code, /after=_w\[0\]\.id/);
+    assert.match(code, /Your tutor answers in the terminal/);
+  });
+
+  test("the line says where the answer comes back", () => {
+    // The whole point: the student is looking at the notebook and the tutor
+    // is about to speak somewhere else.
+    assert.match(code, /terminal/);
+  });
+
+  test("it is true on a cold read", () => {
+    // This cell is in the keepsake a grader opens in March. Nothing in it may
+    // claim something is happening right now.
+    for (const nope of ["right now", "is reading", "is looking", "just now"]) {
+      assert.ok(!code.includes(nope), nope);
+    }
+  });
+
+  test("the anchor is read before the deletes, not after", () => {
+    assert.ok(code.indexOf("_w = [c for c in ctx.cells") < code.indexOf("ctx.delete_cell"));
+  });
+
+  test("running twice does not write the line twice", () => {
+    // Every pass runs this, including one restored from an earlier sitting
+    // where the box has long gone.
+    assert.match(code, /if "cp1_build_handed" not in _names and _w:/);
+  });
+
+  test("a practice round cleans up its own box", () => {
+    const extra = handedInCode("cp1_build_extra_work");
+    assert.ok(extra.includes('["cp1_build_extra_helped","cp1_build_extra_help"]'));
+    assert.match(extra, /name="cp1_build_extra_handed"/);
   });
 });

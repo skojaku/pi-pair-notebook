@@ -71,6 +71,7 @@ import {
   sanitize,
   scanKernelCode,
   stripRedundantImports,
+  handedInCode,
   workCellFor,
 } from "./lib/pysrc.ts";
 import {
@@ -3880,6 +3881,11 @@ export default function (pi: ExtensionAPI) {
           `in an earlier sitting; do not say they have "just" run it. `
         : `Their cell '${cell}' has just run and the bench says Pass. `;
       liveWorkRestored = false;
+      // The 🆘 goes, and one line takes its place saying where the answer
+      // comes back. Before the message, so the page already says "look at the
+      // terminal" by the time the tutor starts talking there; best-effort, so
+      // a slow kernel costs a button on screen and never the hand-in itself.
+      await runKernel(handedInCode(cell), AbortSignal.timeout(5000)).catch(() => undefined);
       pi.sendMessage(
         {
           customType: "student-signal",
@@ -6373,7 +6379,7 @@ export default function (pi: ExtensionAPI) {
           `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
           `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
           `        _f.write(${py(name + "_help")} + "\\n")\n` +
-          `    _asked = mo.md("✋ **Asked.** Your tutor is looking at this cell.")\n` +
+          `    _asked = mo.md("✋ **Asked.** Your tutor answers in the terminal.")\n` +
           `else:\n` +
           // Not mo.md(""): an empty markdown node is a blank cell in the
           // keepsake. This is also the line that tells the student what
@@ -6381,8 +6387,9 @@ export default function (pi: ExtensionAPI) {
           // Submit caption used to do, and still true on a cold read.
           `    _asked = mo.md(\n` +
           `        "<span style='color:#6A6D75;font-size:13px'>*Run the cell whenever you "\n` +
-          `        "are ready — your tutor sees it as soon as it passes. Stuck, or it "\n` +
-          `        "will not run? Press the button, or just say so in the terminal.*</span>"\n` +
+          `        "are ready — your tutor sees it as soon as it passes, and answers in the "\n` +
+          `        "terminal. Stuck, or it will not run? Press the button, or just say so "\n` +
+          `        "in the terminal.*</span>"\n` +
           `    )\n` +
           `_asked`;
         const sendBody =
