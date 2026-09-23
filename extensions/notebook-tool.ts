@@ -3719,11 +3719,6 @@ export default function (pi: ExtensionAPI) {
   // A FACT for the row, and nothing else. It gates nothing — see the ⚖️ nudge
   // in turn_end for why counting turns was the wrong measure for "stuck".
   let turnsInCheckpoint = 0;
-  // The ⚖️ nudge fires once per checkpoint. It used to be an `=== 12` on a
-  // monotonically rising turn count, which is self-limiting; an answer count
-  // can sit on the same number for several turns, so the once-ness has to be
-  // stated rather than implied.
-  let stuckNudged = false;
   // Upload widgets nb_view_image has actually looked at. Cell presence is
   // not evidence that the photo was ASKED for: cp5's script builds the drop
   // area up front, so the area exists from question 1 and a tutor that then
@@ -5286,7 +5281,6 @@ export default function (pi: ExtensionAPI) {
       // Same lifetime, same reason: the same words typed again at the NEXT
       // checkpoint are a fresh answer, not a fresh piece of housekeeping.
       mechanicsAsked.clear();
-      stuckNudged = false;
       // The spans are indices into the window that just closed. Left behind,
       // they would point at whatever the NEXT checkpoint's window puts in
       // those slots — the student's own answers.
@@ -6454,22 +6448,22 @@ export default function (pi: ExtensionAPI) {
         const sendBody =
           `${name}_send = mo.ui.run_button(label="Submit to Tutor")\n` +
           `${name}_send`;
+        // One line, the same before and after a press. A "✅ Submitted" that
+        // appeared on the press stayed up after the student changed their
+        // code, so it went on saying the new code had been handed in when it
+        // had not. Nothing that reacts to the press is shown at all now.
+        // Not mo.md(""): an empty markdown node is a blank cell in the
+        // keepsake.
         const sentCellBody =
           `from pathlib import Path as _P\n` +
           `if ${name}_send.value:\n` +
           `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
           `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
           `        _f.write(${py(name + "_work")} + "\\n")\n` +
-          `    _sent = mo.md("✅ **Submitted.** Check your tutor's comments in the terminal.")\n` +
-          `else:\n` +
-          // Not mo.md(""): an empty markdown node is a blank cell in the
-          // keepsake, and reopening the notebook always lands on this branch.
-          // One short line, true on a cold read months later.
-          `    _sent = mo.md(\n` +
-          `        "<span style='color:#6A6D75;font-size:13px'>*Submit to Tutor hands "\n` +
-          `        "this cell in; your tutor answers in the terminal.*</span>"\n` +
-          `    )\n` +
-          `_sent`;
+          `mo.md(\n` +
+          `    "<span style='color:#6A6D75;font-size:13px'>*Submit to Tutor hands "\n` +
+          `    "this cell in; your tutor answers in the terminal.*</span>"\n` +
+          `)`;
         const handIn = wakesOnRun()
           ? // Nothing hands the work in and nothing asks for help — the run
             // does both. One line under the box saying so.
@@ -6917,7 +6911,6 @@ export default function (pi: ExtensionAPI) {
           // mutable state across a boundary, on a path no boot test reaches.
           detourAsked.clear();
           mechanicsAsked.clear();
-          stuckNudged = false;
           detourSpans.length = 0;
           // A fresh start is turn one of a new session. Carrying the abandoned
           // run's count forward can trip the no-hints late-close gate on the
@@ -7786,78 +7779,16 @@ export default function (pi: ExtensionAPI) {
       clearInterval(triviaTimer);
       triviaTimer = null;
     }
-    // ── Telling the student the ⚖️ box exists ────────────────────────────
-    // The appeal box is the student's only way out from under a tutor that
-    // has stopped helping, and nothing ever mentions it to them: AGENTS.md
-    // tells the tutor how to OBEY a verdict and never to offer one, the
-    // lesson scripts do not name it, and in the notebook it is a collapsed
-    // accordion at the bottom of a long page. A beginner going round the
-    // same question for the fifth time does not know it is there.
+    // `turnsInCheckpoint` gates nothing. It is the FACT on the row — "how
+    // long the two of them were actually on this checkpoint" — beside a hint
+    // count the model supplies from memory.
     //
-    // "Going round" is countable without asking the model to notice — but NOT
-    // as turns, which is what this counted for as long as it existed.
-    //
-    // A turn is not an exchange. Measured on a live m01 session: 13 assistant
-    // turns to 5 student messages, four of those turns with no words in them
-    // at all. A tool call is a turn; a refused checkpoint_done and its retry
-    // are two more; every guard that fires adds one, and guards have been
-    // added since twelve was chosen. So `STUCK_TURNS = 12` was reached after
-    // four or five real exchanges, and an m02 review reported this nudge
-    // landing "right after the very first wrong turn on cp2_distance". That
-    // is pi-pair-notebook#3: the counter resets correctly (cp0 logged 1 and
-    // cp1 logged 8 in the same run) — it was counting the wrong thing.
-    //
-    // Six ANSWERS now, through the same narrowing the note cell and the
-    // late-close gate use, so all three agree on what an answer is. Filler and
-    // a detour's turns are already out of it: a student who asks two questions
-    // mid-checkpoint is curious, not stuck.
-    //
-    // `turnsInCheckpoint` stays, and gates nothing. It is the FACT on the row
-    // — "how long the two of them were actually on this checkpoint" — beside a
-    // hint count the model supplies from memory. Keeping the record and the
-    // trigger as separate numbers is the point: each now measures the thing it
-    // is named after.
+    // There used to be a nudge here: after six answers on one checkpoint the
+    // tutor was told to add a sentence about the ⚖️ box. It arrived with no
+    // lead-in, in the middle of whatever the two of them were doing, and
+    // students read it as a non sequitur. The box is on the page; the tutor
+    // is not told to advertise it.
     turnsInCheckpoint += 1;
-    const stuckAnswers = (() => {
-      try {
-        return answerCountForGate({
-          said: studentSaidSince(lastCtx, false),
-          response: "",
-          detourSpans,
-          detourAsked,
-          mechanicsAsked,
-        });
-      } catch {
-        return 0;
-      }
-    })();
-    // `>=`, not `===`. The old equality was safe only because a turn counter
-    // rises by exactly one; an answer count can jump two in a turn (a student
-    // who types twice while the tutor is working) and an equality would then
-    // skip the nudge for the whole checkpoint. `stuckNudged` carries the
-    // once-ness now, so the comparison does not have to.
-    if (stuckAnswers >= STUCK_ANSWERS && !stuckNudged) {
-      stuckNudged = true;
-      try {
-        pi.sendMessage(
-          {
-            customType: "stuck-nudge",
-            content:
-              `NOTE (invisible to the student): you have been on this checkpoint for a ` +
-              `while. Keep going exactly as you are — but in your NEXT message, add one ` +
-              `plain sentence telling them the ⚖️ box at the bottom of the notebook page ` +
-              `is there if they think their answer should count, want a fresh try, or ` +
-              `would rather move on, and that using it is never held against them. One ` +
-              `sentence, said once, then carry on with the question you are on. Do not ` +
-              `apologise and do not suggest they are failing.`,
-            display: false,
-          },
-          { deliverAs: "nextTurn" },
-        );
-      } catch {
-        /* a nudge that cannot be sent is not worth a broken turn */
-      }
-    }
 
     // ── The turn that came back empty ─────────────────────────────────────
     // Not every silence is a choice the model made. In the same session that
