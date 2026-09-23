@@ -885,6 +885,44 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
  * reached — every caller treats those the same way: surface the RECOVERY line
  * to the tutor, never to the student.
  */
+/**
+ * What the hidden `<checkpoint>_check` cell under a work cell says.
+ *
+ * The check renders only `data-tutor-verdict="pass"|"fail"` (and an
+ * optional `data-why`) in a hidden span; the student's page never shows it.
+ * Read from the kernel, like the run watcher: `ctx.cells` carries each
+ * cell's status and last output. A work cell that raised means the check
+ * never ran, which is "error"; no check cell at all is "none".
+ */
+async function readHiddenCheck(
+  workCell: string,
+): Promise<{ verdict: "pass" | "fail" | "error" | "none"; why?: string }> {
+  const checkCell = workCell.replace(/_work$/, "_check");
+  const r = await runKernel(
+    `import marimo._code_mode as cm\n` +
+      `async with cm.get_context() as ctx:\n` +
+      `    _w = [c for c in ctx.cells if c.name == ${py(workCell)}]\n` +
+      `    _k = [c for c in ctx.cells if c.name == ${py(checkCell)}]\n` +
+      `    if _w and str(_w[0].status) == "exception":\n` +
+      `        print("CHECK error")\n` +
+      `    elif not _k:\n` +
+      `        print("CHECK none")\n` +
+      `    else:\n` +
+      `        _o = _k[0].output\n` +
+      `        _h = str(_o.data) if _o is not None else ""\n` +
+      `        import re as _re\n` +
+      `        _m = _re.search(r'data-tutor-verdict="(pass|fail)"', _h)\n` +
+      `        _y = _re.search(r'data-why="([^"]*)"', _h)\n` +
+      `        print("CHECK", _m.group(1) if _m else "fail", "WHY", _y.group(1) if _y else "")\n`,
+    AbortSignal.timeout(8000),
+  );
+  if (r.failed) return { verdict: "none" };
+  const m = /CHECK (pass|fail|error|none)(?: WHY (.*))?/.exec(r.out);
+  if (!m) return { verdict: "none" };
+  const why = (m[2] ?? "").trim().replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+  return { verdict: m[1] as any, ...(why ? { why } : {}) };
+}
+
 async function runKernel(
   code: string,
   signal?: AbortSignal,
@@ -3308,7 +3346,9 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `        _base, _, _kind = _name.rpartition("_")\n` +
         `        if not _base or _base == _keep or (_base + "_work") not in _src:\n` +
         `            continue\n` +
-        `        if _kind in ("send", "sent", "help", "helped"):\n` +
+        // `check` too: a finished checkpoint's hidden check has nobody left to
+        // report to, and cp7's re-runs a 369-station sweep on every reopen.
+        `        if _kind in ("send", "sent", "help", "helped", "check"):\n` +
         `            ctx.delete_cell(_name)\n` +
         `            _done.append(_name)\n` +
         `        elif _kind == "work" and _name in _open:\n` +
@@ -3816,6 +3856,44 @@ export default function (pi: ExtensionAPI) {
       // was added to stop.
       const isWidgetCode = /_ed$/.test(widget);
       const isCellCode = /_work$/.test(widget);
+      if (isCellCode) {
+        void (async () => {
+          const found = await readHiddenCheck(widget);
+          const what =
+            found.verdict === "pass"
+              ? `The hidden check under it says PASS: their code does the task. Say ONE ` +
+                `specific line about what THEY wrote, then ask the checkpoint's own ` +
+                `question, the one the check cannot ask.`
+              : found.verdict === "fail"
+                ? `The hidden check under it says FAIL` +
+                  (found.why ? ` (${found.why})` : "") +
+                  `. Never fix it for them and never write a line of their code. Say what ` +
+                  `you can SEE in what they wrote or in what it printed, and ask ONE ` +
+                  `smaller question that gets them to the next step.`
+                : found.verdict === "error"
+                  ? `Their cell raised an error, so nothing was checked; Python's own ` +
+                    `message is on their screen under the cell. Point at the ONE line you ` +
+                    `can see is wrong and ask a single smaller question about it.`
+                  : `There is no hidden check for this cell. Judge what their code printed ` +
+                    `against the checkpoint yourself.`;
+          pi.sendMessage(
+            {
+              customType: "student-signal",
+              content:
+                `The student pressed Submit to Tutor under '${widget}'. Read their code ` +
+                `with nb_read_code("${widget}") now — it is a real marimo cell, so it has ` +
+                `no .value and nb_read cannot reach it, and never ask them to paste it. ` +
+                `Their own output is on their screen; never read it back to them. ` +
+                `The student NEVER sees pass or fail: never say "pass", "fail", ` +
+                `"correct" or "the check" to them. ` +
+                what,
+              display: false,
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        })();
+        return;
+      }
       pi.sendMessage(
         {
           customType: "student-signal",
@@ -6268,6 +6346,14 @@ export default function (pi: ExtensionAPI) {
           description: "Checkpoint id this build is for, e.g. 'cp6_large_n_experiment'. Omit for detours.",
         }),
       ),
+      check: Type.Optional(
+        Type.String({
+          description:
+            "Code mode: the script's hidden check, e.g. 'check_build(g, n_nodes, n_edges)'. " +
+            "Runs in a hidden '<name>_check' cell under the student's; its result reaches " +
+            "you when they press Submit to Tutor, and never reaches them.",
+        }),
+      ),
     }),
     async execute(_id, params, signal) {
       const name = String(params.name ?? "").trim();
@@ -6277,6 +6363,11 @@ export default function (pi: ExtensionAPI) {
       // The scaffold is model-authored Python the student is invited to run.
       const refusedScaffold = kernelGuard(String(params.scaffold ?? ""));
       if (refusedScaffold) return toResult({ out: refusedScaffold, failed: false });
+      const checkExpr = String(params.check ?? "").trim();
+      if (checkExpr) {
+        const refusedCheck = kernelGuard(checkExpr);
+        if (refusedCheck) return toResult({ out: refusedCheck, failed: false });
+      }
       const exCpId = String(params.checkpoint ?? "").trim();
       const exKey = `exercise:${exCpId}`;
       if (
@@ -6512,6 +6603,15 @@ export default function (pi: ExtensionAPI) {
           // hide_code=False is the whole point: this is the cell they edit.
           `        _cid = ctx.create_cell(${py(String(params.scaffold ?? ""))}, name=${py(name + "_work")}, hide_code=False, after=_cid)\n` +
           `        ctx.run_cell(_cid)\n` +
+          // The hidden check. It reads the names the student's cell binds, so
+          // marimo re-runs it after every run of theirs, and what it renders
+          // is only a hidden marker (data-tutor-verdict) that the Submit
+          // signal reads. The student's own cell ends in a line that draws or
+          // prints what THEIR code produced, and nothing on the page judges it.
+          (checkExpr
+            ? `        _cid = ctx.create_cell(${py(checkExpr)}, name=${py(name + "_check")}, hide_code=True, after=_cid)\n` +
+              `        ctx.run_cell(_cid)\n`
+            : "") +
           handIn;
         codeModeCode += `        _fresh = True\n`;
         // Printed once the cells are up. What it is for is at the failure
@@ -6608,10 +6708,15 @@ export default function (pi: ExtensionAPI) {
                 `you can see, and ONE smaller question. Never write a line of their code, ` +
                 `and never make a run feel like an interruption.\n`
               : `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
-                `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own ` +
-                `output is what the bench prints — there is no separate output cell. Ask for ` +
-                `the submit, then WAIT: their press starts your turn, and you read their code ` +
-                `with nb_read_code("${name}_work"), never nb_read.\n`) +
+                `scaffold in '${name}_work', ` +
+                (checkExpr
+                  ? `a hidden '${name}_check' cell running ${checkExpr} (the student never ` +
+                    `sees its result), `
+                  : "") +
+                `and a Submit to Tutor button under it. Its own output is what THEIR code ` +
+                `prints or draws. Ask for the submit, then WAIT: their press starts your ` +
+                `turn and tells you what the check found, and you read their code with ` +
+                `nb_read_code("${name}_work"), never nb_read.\n`) +
             (droppedEnv.length
               ? `(env_vars is ignored in code mode — a real cell already sees every ` +
                 `notebook variable. Dropped: ${droppedEnv.join(", ")}.)\n`
