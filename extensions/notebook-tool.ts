@@ -71,7 +71,6 @@ import {
   sanitize,
   scanKernelCode,
   stripRedundantImports,
-  handedInCode,
   pickNotebookSession,
   workCellFor,
 } from "./lib/pysrc.ts";
@@ -1957,24 +1956,30 @@ function moduleView(): "app" | "code" {
 }
 
 /**
- * Does this module hand its work in by RUNNING the cell, rather than by
- * pressing a button? `"tutor_wakes_on": "pass"` in lesson/index.json.
+ * Does this module put the tutor beside the student as they type, rather than
+ * behind a button? `"tutor_wakes_on": "run"` in lesson/index.json.
  *
- * A Submit button is one more thing on the page and one more thing to
- * explain, and in a code-mode module it is redundant: the cell the student
- * runs already ends in the module's own bench, and the bench already knows
- * whether it passed. So the module can say "the run IS the hand-in" and the
- * watcher below wakes the tutor the moment a work cell comes back green.
+ * A button is one more thing on the page and one more thing to explain, and
+ * in a code-mode module it is redundant: the cell the student runs already
+ * ends in the module's own bench. So the module can say "every run is read",
+ * and the watcher below starts the tutor's turn on each settled run of the
+ * work cell — pass, fail, or a traceback.
+ *
+ * `"pass"` is the same thing under its first name, from when only a green
+ * cell woke anyone. It is still accepted: a module folder in a student's
+ * hands says "pass", and a setting that quietly stopped meaning anything
+ * would take the tutor away from them with no error anywhere.
  *
  * Opt-in per module, and the module has to hold up its end: its bench must
  * mark a pass in its output with `data-tutor-verdict="pass"` (see the
- * watcher). Without the setting a module keeps its button, which is why
- * m01 and m02 are untouched by any of this.
+ * watcher), or every run reads as a fail. Without the setting a module keeps
+ * its button, which is why m01 and m02 are untouched by any of this.
  */
-function wakesOnPass(): boolean {
+function wakesOnRun(): boolean {
   try {
     const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
-    return JSON.parse(raw).tutor_wakes_on === "pass" && moduleView() === "code";
+    const on = JSON.parse(raw).tutor_wakes_on;
+    return (on === "run" || on === "pass") && moduleView() === "code";
   } catch {
     return false;
   }
@@ -2020,7 +2025,7 @@ let liveWorkRestored = false;
  * session — so the file is the authority that is awake at this moment.
  */
 function restoreLiveWorkCell(checkpointId: string | null): void {
-  if (!wakesOnPass()) return;
+  if (!wakesOnRun()) return;
   let cell: string | null = null;
   try {
     cell = workCellFor(fs.readFileSync(notebookPath(), "utf-8"), checkpointId);
@@ -2038,6 +2043,9 @@ function restoreLiveWorkCell(checkpointId: string | null): void {
  * scaffold working, not the notebook failing.
  */
 const BOX_IS_UP = "__pair_notebook_box_is_up__";
+/** Prefix for the scaffold digest the insert prints, so the watcher can tell
+ *  the student's first real run from the blanks raising on arrival. */
+const SCAFFOLD_SEED = "__pair_notebook_scaffold__";
 
 /** (cell, code) pairs already reported, so one pass is one turn. */
 const passReported = new Set<string>();
@@ -3837,31 +3845,43 @@ export default function (pi: ExtensionAPI) {
   }, 2000);
   (signalTimer as any).unref?.();
 
-  // ── The run IS the hand-in ────────────────────────────────────────────
-  // In a module with `"tutor_wakes_on": "pass"` there is no Submit button.
-  // The student fills the blanks and runs the cell the way they will use a
-  // notebook for the rest of their life, and the moment the bench in their
-  // own last line comes back green, this starts the tutor's turn.
+  // ── Every run is checked ───────────────────────────────────────────────
+  // In a module with `"tutor_wakes_on"` there is no Submit button and no 🆘:
+  // the student fills the blanks and runs the cell the way they will use a
+  // notebook for the rest of their life, and every settled run starts the
+  // tutor's turn. Pass, fail, or a traceback — the tutor looks at what they
+  // wrote each time.
+  //
+  // It used to wake only on a pass, and a fail woke nobody on purpose: "the
+  // student fixes it and runs it again". What that asked of a beginner is
+  // that they know WHY it failed, which is the one thing they are here to
+  // learn, and it left them alone with a red cell and a button they had to
+  // decide to press. A tutor that reads every run is what a person sitting
+  // beside them would do.
   //
   // It reads the kernel rather than a file, because a button writes a line
   // and a cell does not: `ctx.cells` carries each cell's status, its errors
-  // and its last output, so a pass is a fact about the notebook and not a
+  // and its last output, so a run is a fact about the notebook and not a
   // message anyone had to remember to send.
   //
-  // A FAIL WAKES NOBODY, and that is the module's choice, not an oversight.
-  // The student fixes it and runs it again; the tutor is one line away in
-  // the terminal whenever they want it, and `<name>_cue` under the box says
-  // so. What this watcher must never do is fire twice for the same code —
-  // a student who re-runs a green cell to look at the picture again is not
-  // handing it in a second time.
+  // What it must never do is fire twice for the same code — a student who
+  // re-runs an unchanged cell to look at the picture again has not written
+  // anything new, and a tutor that speaks again has nothing new to say.
+  // That is also what keeps the scaffold quiet: a scaffold full of blanks
+  // raises the moment it is inserted, and its digest is recorded at insert
+  // time so that first raise is never mistaken for the student's work.
   const passTimer = setInterval(() => {
     void (async () => {
       const cell = liveWorkCell;
-      if (!cell || passPolling || turnInFlight || !wakesOnPass()) return;
+      if (!cell || passPolling || turnInFlight || !wakesOnRun()) return;
       // Never poll on top of a turn: the tutor may be holding the kernel
       // itself, and a turn queued behind a turn is the student answered
       // twice. The abort keeps a poll inside its own interval — without it
       // a closed notebook tab makes every tick wait out resolveSession.
+      //
+      // It is also what coalesces a burst: a student who runs three times
+      // while the tutor is mid-turn is read once, on their latest code,
+      // when the turn ends.
       passPolling = true;
       const r = await runKernel(
         `import hashlib\n` +
@@ -3871,51 +3891,71 @@ export default function (pi: ExtensionAPI) {
           `    if _c:\n` +
           `        _o = _c[0].output\n` +
           `        _h = str(_o.data) if _o is not None else ""\n` +
+          `        _s = str(_c[0].status)\n` +
+          // "queued", "running" and "stale" are a cell mid-flight or never
+          // run. Only a settled one is something to read.
+          `        if _s in ("idle", "exception"):\n` +
           // The marker is the module's half of the bargain: its bench puts
           // data-tutor-verdict="pass" in the output it renders. Hunting for
           // a tick or the word "Pass" instead would fire on a student's own
           // print, on a figure's alt text, on a note cell quoting the word.
-          `        if _c[0].status == "idle" and 'data-tutor-verdict="pass"' in _h:\n` +
+          `            _v = "pass" if 'data-tutor-verdict="pass"' in _h else (\n` +
+          `                "error" if _s == "exception" else "fail")\n` +
           // A digest of the code, not hash(): Python salts hash() per
           // process, so a kernel that restarted mid-session would call the
-          // same green cell a new pass and hand it in twice.
-          `            print("PASS", hashlib.md5(_c[0].code.encode()).hexdigest()[:12])\n`,
+          // same cell a new run and read it out twice.
+          `            print("RUN", _v, hashlib.md5(_c[0].code.encode()).hexdigest()[:12])\n`,
         AbortSignal.timeout(5000),
       ).finally(() => {
         passPolling = false;
       });
       if (r.failed) return;
-      const m = /PASS ([0-9a-f]+)/.exec(r.out);
+      const m = /RUN (pass|fail|error) ([0-9a-f]+)/.exec(r.out);
       if (!m) return;
-      const key = `${cell}:${m[1]}`;
+      const verdict = m[1];
+      const key = `${cell}:${m[2]}`;
       if (passReported.has(key)) return;
       passReported.add(key);
-      // A restored cell may have been green since the last sitting. Say that,
-      // rather than "has just run": the student knows when they ran it, and a
-      // session that opens by congratulating them on this morning's work when
-      // they did it last night has got the first line of the day wrong.
-      const justRan = liveWorkRestored
-        ? `Their cell '${cell}' is green — the bench says Pass. They may have run it ` +
-          `in an earlier sitting; do not say they have "just" run it. `
-        : `Their cell '${cell}' has just run and the bench says Pass. `;
+      // A restored cell may have been sitting there since the last sitting.
+      // Say that rather than "has just run": the student knows when they ran
+      // it, and a session that opens by congratulating them on this morning's
+      // work when they did it last night has got the first line of the day
+      // wrong.
+      const when = liveWorkRestored
+        ? `Their cell '${cell}' is where they left it at the end of an earlier sitting; ` +
+          `do not say they have "just" run it. `
+        : `Their cell '${cell}' has just run. `;
       liveWorkRestored = false;
-      // The 🆘 goes, and one line takes its place saying where the answer
-      // comes back. Before the message, so the page already says "look at the
-      // terminal" by the time the tutor starts talking there; best-effort, so
-      // a slow kernel costs a button on screen and never the hand-in itself.
-      await runKernel(handedInCode(cell), AbortSignal.timeout(5000)).catch(() => undefined);
+      // Three different jobs. The pass is the only one where the checkpoint's
+      // own question comes next; the other two are a tutor looking over their
+      // shoulder, and the rule that survives all three is that the tutor
+      // never writes a line of their code.
+      const what =
+        verdict === "pass"
+          ? `The bench says **Pass**. Say ONE specific line about what THEY wrote — not ` +
+            `that it passed, which they can see — and then ask the checkpoint's own ` +
+            `question, the one the bench cannot.`
+          : verdict === "error"
+            ? `It raised before the bench could judge it, and Python's own message is on ` +
+              `screen under the cell, so do not read it back to them. Never congratulate, ` +
+              `never fix it for them, and never write a line of their code. Point at the ` +
+              `ONE line you can see is wrong and ask a single smaller question about it. ` +
+              `Two short sentences at most — they are mid-edit and will run it again.`
+            : `The bench says **Fail**. Never congratulate, never fix it for them, and ` +
+              `never write a line of their code. Say what you can SEE in what they wrote, ` +
+              `and ask ONE smaller question that gets them to the next step. Two short ` +
+              `sentences at most — they are mid-edit and will run it again.`;
       pi.sendMessage(
         {
           customType: "student-signal",
           content:
-            justRan +
-            `That is the ` +
-            `hand-in — there is no button in this module, and nothing else is coming. ` +
-            `Read it with nb_read_code("${cell}") now: it is a real marimo cell, so it ` +
-            `has no .value and nb_read cannot reach it, and never ask them to paste it. ` +
-            `Their output is already on screen under the cell. Say ONE specific line ` +
-            `about what THEY wrote — not that it passed, which they can see — and then ` +
-            `ask the checkpoint's own question, the one the bench cannot.`,
+            when +
+            `There is no button in this module and nothing else is coming: every run is ` +
+            `read, and this is one. ` +
+            `Read their code with nb_read_code("${cell}") first — it is a real marimo ` +
+            `cell, so it has no .value, nb_read cannot reach it, and you must never ask ` +
+            `them to paste it. Their output is already on screen under the cell. ` +
+            what,
           display: false,
         },
         { deliverAs: "followUp", triggerTurn: true },
@@ -6388,28 +6428,27 @@ export default function (pi: ExtensionAPI) {
         // not know they are allowed to interrupt can sit in front of one
         // for a long time. Typing in the terminal has always worked and
         // still does — this is the same door with a handle on it.
-        const helpBody =
-          `${name}_help = mo.ui.run_button(label="🆘 I'm stuck — ask my tutor")\n` +
-          `${name}_help`;
-        const helpedBody =
-          `from pathlib import Path as _P\n` +
-          `if ${name}_help.value:\n` +
-          `    _P("session_artifacts").mkdir(exist_ok=True)\n` +
-          `    with open("session_artifacts/student_signal.txt", "a") as _f:\n` +
-          `        _f.write(${py(name + "_help")} + "\\n")\n` +
-          `    _asked = mo.md("✋ **Asked.** Your tutor answers in the terminal.")\n` +
-          `else:\n` +
-          // Not mo.md(""): an empty markdown node is a blank cell in the
-          // keepsake. This is also the line that tells the student what
-          // happens when they run — one grey sentence, doing the job the
-          // Submit caption used to do, and still true on a cold read.
-          `    _asked = mo.md(\n` +
-          `        "<span style='color:#6A6D75;font-size:13px'>*Run the cell whenever you "\n` +
-          `        "are ready — your tutor sees it as soon as it passes, and answers in the "\n` +
-          `        "terminal. Stuck, or it will not run? Press the button, or just say so "\n` +
-          `        "in the terminal.*</span>"\n` +
-          `    )\n` +
-          `_asked`;
+        // One grey line and no button at all.
+        //
+        // There was a 🆘 "I'm stuck — ask my tutor" here, and a second cell
+        // reacting to it. Both are gone. A button is a decision asked of the
+        // person least able to make it: a beginner staring at a red cell has
+        // to work out that they are stuck ENOUGH, and the ones who most need
+        // a tutor are the ones who will not press it. Now every run is read,
+        // so there is nothing left to ask for — which also means nothing on
+        // the page writes to the tutor any more, and no stray press can
+        // arrive as a hand-in of work nobody handed in.
+        //
+        // Static: no `.value`, no reactivity, nothing to re-render. It says
+        // the same thing on the day they write it and in a keepsake opened
+        // in March, which is the test every line in this notebook has to
+        // pass.
+        const cueBody =
+          `mo.md(\n` +
+          `    "<span style='color:#6A6D75;font-size:13px'>*Run this cell whenever you "\n` +
+          `    "are ready, as often as you like. Your tutor reads every run — passed or "\n` +
+          `    "not — and answers in the terminal.*</span>"\n` +
+          `)`;
         const sendBody =
           `${name}_send = mo.ui.run_button(label="Submit to Tutor")\n` +
           `${name}_send`;
@@ -6429,12 +6468,10 @@ export default function (pi: ExtensionAPI) {
           `        "this cell in; your tutor answers in the terminal.*</span>"\n` +
           `    )\n` +
           `_sent`;
-        const handIn = wakesOnPass()
-          ? // Nothing hands the work in — the bench in their own cell does.
-            // What is under the box is the way OUT of a cell that will not go.
-            `        _cid = ctx.create_cell(${py(helpBody)}, name=${py(name + "_help")}, hide_code=True, after=_cid)\n` +
-            `        ctx.run_cell(_cid)\n` +
-            `        _cid = ctx.create_cell(${py(helpedBody)}, name=${py(name + "_helped")}, hide_code=True, after=_cid)\n` +
+        const handIn = wakesOnRun()
+          ? // Nothing hands the work in and nothing asks for help — the run
+            // does both. One line under the box saying so.
+            `        _cid = ctx.create_cell(${py(cueBody)}, name=${py(name + "_cue")}, hide_code=True, after=_cid)\n` +
             `        ctx.run_cell(_cid)\n`
           : `        _cid = ctx.create_cell(${py(sendBody)}, name=${py(name + "_send")}, hide_code=True, after=_cid)\n` +
             `        ctx.run_cell(_cid)\n` +
@@ -6446,6 +6483,14 @@ export default function (pi: ExtensionAPI) {
           `    _names = [c.name for c in ctx.cells]\n` +
           `    if ${py(name + "_work")} in _names:\n` +
           `        print("exercise already in the notebook — skipped duplicate insert")\n` +
+          // A notebook built before the 🆘 was removed still carries the pair.
+          // This is the one place an upgraded notebook comes back through, so
+          // it is where they go. `_helped` first: it reads the button
+          // `_help` defines, and removing a definition out from under its
+          // reader leaves a NameError where the student's work used to be.
+          `        for _old in ${pyList([name + "_helped", name + "_help"])}:\n` +
+          `            if _old in _names:\n` +
+          `                ctx.delete_cell(_old)\n` +
           // The box is up here too — it was up before this call. Said in both
           // branches because any cell in the notebook that happens to be in
           // an error state makes the kernel call itself report unsuccessful,
@@ -6459,10 +6504,41 @@ export default function (pi: ExtensionAPI) {
           `        _cid = ctx.create_cell(${py(String(params.scaffold ?? ""))}, name=${py(name + "_work")}, hide_code=False, after=_cid)\n` +
           `        ctx.run_cell(_cid)\n` +
           handIn;
+        codeModeCode += `        _fresh = True\n`;
         // Printed once the cells are up. What it is for is at the failure
         // check below.
         codeModeCode += `        print(${py(BOX_IS_UP)})\n`;
         codeModeCode += focusCellCode("_first", "        ");
+        // The untouched scaffold's digest, recorded so the watcher does not
+        // mistake it for the student's own first run. marimo runs a cell the
+        // moment it exists, and a scaffold is a cell full of blanks — so
+        // without this, inserting an exercise would wake the tutor on the
+        // student's behalf before they had typed a character.
+        //
+        // Computed in the kernel and not here: it has to be the same bytes
+        // marimo stored, and anything normalising a trailing newline between
+        // the two would make the digests disagree and the guard do nothing.
+        //
+        // A SECOND context, because `ctx.cells` is a snapshot taken when the
+        // context opened — the cell that was just created is not in the one
+        // above, so reading it there printed nothing at all and the guard was
+        // silently no guard. (Measured: same context, no output; fresh
+        // context, a digest the watcher then computes identically.)
+        //
+        // Only on a fresh insert. On the duplicate-skip path — a resumed
+        // session coming back through here — the cell already holds the
+        // student's own work, and recording that would swallow a run they
+        // made and nobody read, which is the fault restoreLiveWorkCell exists
+        // to end.
+        codeModeCode =
+          `_fresh = False\n` +
+          `import hashlib as _hl\n` +
+          codeModeCode +
+          `async with cm.get_context() as ctx:\n` +
+          `    if _fresh:\n` +
+          `        _sw = [c for c in ctx.cells if c.name == ${py(name + "_work")}]\n` +
+          `        if _sw:\n` +
+          `            print(${py(SCAFFOLD_SEED)} + _hl.md5(_sw[0].code.encode()).hexdigest()[:12])\n`;
         // Clear the desk before the new work lands: every finished
         // checkpoint folds to a line, and the page the student scrolls is
         // the exercise in hand with an index of their own work above it.
@@ -6482,6 +6558,14 @@ export default function (pi: ExtensionAPI) {
         // The traceback still goes to the tutor, with a line saying what it
         // is: the student is about to meet the same message when they run
         // the cell themselves, and it is the scaffold working as designed.
+        // Take the scaffold's digest out of the output and record it as
+        // already read, so the blanks raising on arrival is never mistaken
+        // for the student's own first run.
+        const seed = new RegExp(`${SCAFFOLD_SEED}([0-9a-f]+)\\s*`).exec(cmResult.out);
+        if (seed) {
+          passReported.add(`${name}_work:${seed[1]}`);
+          cmResult.out = cmResult.out.replace(seed[0], "");
+        }
         if (cmResult.out.includes(BOX_IS_UP)) {
           cmResult.failed = false;
           cmResult.reason = undefined;
@@ -6496,24 +6580,24 @@ export default function (pi: ExtensionAPI) {
         }
         // From here until the checkpoint closes, the watcher is looking at
         // this one cell and no other.
-        if (!cmResult.failed && wakesOnPass()) {
+        if (!cmResult.failed && wakesOnRun()) {
           liveWorkCell = `${name}_work`;
           liveWorkRestored = false;
         }
         if (!cmResult.failed) await pinFurnitureToBottom(signal);
         if (!cmResult.failed) {
           cmResult.out =
-            (wakesOnPass()
+            (wakesOnRun()
               ? `Exercise inserted as a REAL cell the student edits: your instructions, ` +
-                `the scaffold in '${name}_work', and a 🆘 "I'm stuck" button under it. ` +
-                `Nothing hands work in — the cell's last line is the bench, and RUNNING it ` +
-                `is the hand-in. Say your one line, then WAIT and say nothing. Two things ` +
-                `can start your next turn: the cell PASSES, and you read their code with ` +
-                `nb_read_code("${name}_work") and ask the checkpoint's question; or they ` +
-                `press 🆘, which is them saying it will not go — then assume it does not ` +
-                `pass, never congratulate, and ask ONE smaller question about the line you ` +
-                `can see. A fail on its own is silent to you, and that is the design: they ` +
-                `fix it and run it again as often as they like.\n`
+                `the scaffold in '${name}_work', and one grey line under it. There is no ` +
+                `button of any kind — no Submit, no 🆘. Say your one line, then WAIT and ` +
+                `say nothing. EVERY run of that cell starts your next turn, whether it ` +
+                `passes or not, and the message will tell you which. You will read their ` +
+                `code with nb_read_code("${name}_work") then. They will run it many times ` +
+                `and you will be woken many times: on a pass, ask the checkpoint's ` +
+                `question; on a fail or a traceback, two short sentences at most — what ` +
+                `you can see, and ONE smaller question. Never write a line of their code, ` +
+                `and never make a run feel like an interruption.\n`
               : `Exercise inserted as a REAL cell the student edits: your instructions, the ` +
                 `scaffold in '${name}_work', and a Submit to Tutor button under it. Its own ` +
                 `output is what the bench prints — there is no separate output cell. Ask for ` +
