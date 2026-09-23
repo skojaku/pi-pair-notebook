@@ -76,6 +76,7 @@ import {
   cellSource,
   cellNames,
 } from "./lib/pysrc.ts";
+import { announcesClose } from "./lib/turns.ts";
 import {
   chooseNotebook,
   DEFAULT_NOTEBOOK,
@@ -3726,8 +3727,19 @@ export default function (pi: ExtensionAPI) {
   // paper in it — which is exactly what a live run did.
   const viewedPhotos = new Set<string>();
 
+  // Whether checkpoint_done or chapter_done has run since the student last
+  // spoke, and whether the said-but-not-done nudge has fired on the
+  // checkpoint that is open now. See turn_end.
+  let closedSinceStudent = false;
+  let saidCloseNudged = false;
+
   pi.on("tool_result", async (event: any) => {
     recordPickedAnswer(event);
+    const tool = String(event?.toolName ?? "");
+    if ((tool === "checkpoint_done" || tool === "chapter_done") && !event?.isError) {
+      closedSinceStudent = true;
+      saidCloseNudged = false;
+    }
   });
 
   // ── The student's "Send to my tutor" button ───────────────────────────
@@ -4767,8 +4779,9 @@ export default function (pi: ExtensionAPI) {
   // narration nudge's own message_end handler, so deleting that block would
   // have taken this line with it and left the guard dead for the rest of the
   // session after its first fire. It gets its own handler now.
-  pi.on("message_end", async () => {
+  pi.on("message_end", async (event: any) => {
     runawayFired = false;
+    if (event?.message?.role === "user") closedSinceStudent = false;
   });
 
   // ── The breath before a drawing, and why it is not here any more ─────────
@@ -7819,6 +7832,50 @@ export default function (pi: ExtensionAPI) {
     // beginner reading "your tutor returned an empty response" learns only
     // that the thing they are graded in is broken.
     const parts = Array.isArray(event?.message?.content) ? event.message.content : [];
+
+    // ── The close that was said and not done ──────────────────────────────
+    // A live m03 run ended cp1 on "You had it. The checkpoint closes now."
+    // with no checkpoint_done — so no note, no next exercise, and a student
+    // who sat there until they typed "next". The close is the tutor's to
+    // make, and the contract says it never stops them; a student should not
+    // have to know the word that restarts it. When a turn ends on words
+    // alone, asks nothing, announces a close (lib/turns.ts), and no close
+    // has run since the student spoke: make it now. Once per checkpoint, so
+    // it can never be the thing that loops.
+    if (
+      event?.message?.role === "assistant" &&
+      event.message.stopReason === "stop" &&
+      !closedSinceStudent &&
+      !saidCloseNudged &&
+      !parts.some((p: any) => p?.type === "toolCall")
+    ) {
+      const said = parts
+        .filter((p: any) => p?.type === "text")
+        .map((p: any) => String(p.text ?? ""))
+        .join("\n");
+      if (announcesClose(said)) {
+        saidCloseNudged = true;
+        try {
+          pi.sendMessage(
+            {
+              customType: "said-close",
+              content:
+                `NOTE (invisible to the student): you just told them the checkpoint ` +
+                `closes, but you did not call checkpoint_done, so nothing has moved — ` +
+                `no note, no next exercise — and they are waiting. Call checkpoint_done ` +
+                `for it NOW, then start the next checkpoint exactly as its result says. ` +
+                `Say nothing about this note and do not repeat the praise.`,
+              display: false,
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        } catch {
+          /* a nudge that cannot be sent is not worth a broken turn */
+        }
+        return;
+      }
+    }
+
     const stalled =
       event?.message?.role === "assistant" &&
       event.message.stopReason === "stop" &&
