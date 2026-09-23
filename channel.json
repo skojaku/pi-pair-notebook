@@ -2,8 +2,14 @@
   "schema": 1,
   "frozen": false,
   "modules": {
-    "m01-euler-tour": { "toolkit": "v0.14.0" },
-    "m02-small-world": { "toolkit": "v0.14.0" },
-    "m03-robustness": { "toolkit": "v0.15.0" }
+    "m01-euler-tour": {
+      "toolkit": "v0.14.0"
+    },
+    "m02-small-world": {
+      "toolkit": "v0.14.0"
+    },
+    "m03-robustness": {
+      "toolkit": "v0.17.0"
+    }
   }
 }
