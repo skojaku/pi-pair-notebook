@@ -71,6 +71,7 @@ import {
   sanitize,
   scanKernelCode,
   stripRedundantImports,
+  workCellFor,
 } from "./lib/pysrc.ts";
 import {
   chooseNotebook,
@@ -1963,12 +1964,54 @@ function wakesOnPass(): boolean {
 /**
  * The work cell of the checkpoint on screen, while one is open.
  *
- * Set when an exercise is built, cleared when its checkpoint closes: the
- * pass watcher polls only while this is set, so a session spends nothing on
- * it between checkpoints, and a student re-running an old green cell weeks
+ * Set when an exercise is built or when a resumed session puts it back
+ * (`restoreLiveWorkCell`), cleared when its checkpoint closes: the pass
+ * watcher polls only while this is set, so a session spends nothing on it
+ * between checkpoints, and a student re-running an old green cell weeks
  * later wakes nobody.
  */
 let liveWorkCell: string | null = null;
+/**
+ * True while `liveWorkCell` came back from a previous sitting rather than
+ * from an exercise built this session. It decides one thing: the wake message
+ * may not say the cell "has just run", because it may have been green since
+ * yesterday, and a tutor that congratulates a student on a run they made
+ * before dinner is saying something false in the first line of the day.
+ */
+let liveWorkRestored = false;
+
+/**
+ * Put the pass watcher back on the checkpoint that is already open.
+ *
+ * `liveWorkCell` is memory, and `nb_add_exercise` is the only thing that ever
+ * wrote to it — so the watcher worked on the day an exercise was built and
+ * was dead every session after. The resume brief is what closes the trap:
+ * it tells the tutor, correctly, NOT to rebuild cells that are already in the
+ * notebook, so on a resumed session nb_add_exercise is never called, nothing
+ * sets the cell, and the watcher's first line returns on every tick. The
+ * student runs their cell, it goes green, and nobody comes — silently, which
+ * is the worst shape a fault can have in a room with one student in it.
+ *
+ * A lesson of this length is lived across sittings. "Works until you close
+ * the laptop" is, in practice, does not work.
+ *
+ * Read from the notebook FILE, not the kernel: this runs at session_start,
+ * where the kernel is still cold and stays cold until the student's browser
+ * attaches. marimo has already saved the cell — it was written in an earlier
+ * session — so the file is the authority that is awake at this moment.
+ */
+function restoreLiveWorkCell(checkpointId: string | null): void {
+  if (!wakesOnPass()) return;
+  let cell: string | null = null;
+  try {
+    cell = workCellFor(fs.readFileSync(notebookPath(), "utf-8"), checkpointId);
+  } catch {
+    return; // no notebook yet: a first session has nothing to restore
+  }
+  if (!cell) return;
+  liveWorkCell = cell;
+  liveWorkRestored = true;
+}
 /**
  * Printed by a code-mode insert once its cells are up. The insert's success
  * is decided by this line rather than by the kernel's own success flag: a
@@ -3828,11 +3871,21 @@ export default function (pi: ExtensionAPI) {
       const key = `${cell}:${m[1]}`;
       if (passReported.has(key)) return;
       passReported.add(key);
+      // A restored cell may have been green since the last sitting. Say that,
+      // rather than "has just run": the student knows when they ran it, and a
+      // session that opens by congratulating them on this morning's work when
+      // they did it last night has got the first line of the day wrong.
+      const justRan = liveWorkRestored
+        ? `Their cell '${cell}' is green — the bench says Pass. They may have run it ` +
+          `in an earlier sitting; do not say they have "just" run it. `
+        : `Their cell '${cell}' has just run and the bench says Pass. `;
+      liveWorkRestored = false;
       pi.sendMessage(
         {
           customType: "student-signal",
           content:
-            `Their cell '${cell}' has just run and the bench says Pass. That is the ` +
+            justRan +
+            `That is the ` +
             `hand-in — there is no button in this module, and nothing else is coming. ` +
             `Read it with nb_read_code("${cell}") now: it is a real marimo cell, so it ` +
             `has no .value and nb_read cannot reach it, and never ask them to paste it. ` +
@@ -4093,6 +4146,9 @@ export default function (pi: ExtensionAPI) {
           moduleFinished = finished;
           chapter = (nextId && chapters.find((c) => c.checkpoints.includes(nextId))) || chapter;
           pendingCheckpoint = nextId ?? null;
+          // Their cell may have been green since the last sitting, with the
+          // hand-in it was supposed to trigger lost with the process.
+          restoreLiveWorkCell(pendingCheckpoint);
           // The continue-or-fresh answer below is session mechanics, not a
           // lesson answer, and nothing drains the pick buffer until the next
           // checkpoint_done — so without this it rode into that checkpoint's
@@ -5218,6 +5274,7 @@ export default function (pi: ExtensionAPI) {
       // now, so a student who reopens that fold and runs the cell again is
       // looking at their own work, not handing it in.
       liveWorkCell = null;
+      liveWorkRestored = false;
       const logged = appendLog({
         type: "checkpoint",
         id,
@@ -6414,7 +6471,10 @@ export default function (pi: ExtensionAPI) {
         }
         // From here until the checkpoint closes, the watcher is looking at
         // this one cell and no other.
-        if (!cmResult.failed && wakesOnPass()) liveWorkCell = `${name}_work`;
+        if (!cmResult.failed && wakesOnPass()) {
+          liveWorkCell = `${name}_work`;
+          liveWorkRestored = false;
+        }
         if (!cmResult.failed) await pinFurnitureToBottom(signal);
         if (!cmResult.failed) {
           cmResult.out =
@@ -6755,6 +6815,7 @@ export default function (pi: ExtensionAPI) {
           // reason as the other two resets: turn_end has not run yet.
           turnsInCheckpoint = -1;
           liveWorkCell = null;
+          liveWorkRestored = false;
           passReported.clear();
           studentSaidSince(ctx, true);
           pi.sendMessage(

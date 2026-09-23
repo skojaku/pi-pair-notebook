@@ -7,7 +7,7 @@
  * python3 is already required by the review harness. Where it is missing the
  * round-trip cases skip and the structural ones still run.
  */
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 
@@ -20,6 +20,7 @@ import {
   sanitize,
   scanKernelCode,
   stripRedundantImports,
+  workCellFor,
 } from "../extensions/lib/pysrc.ts";
 
 const HAVE_PY = spawnSync("python3", ["-c", "pass"]).status === 0;
@@ -287,4 +288,62 @@ test("saving a photo beside the log is still fine", () => {
     'import base64, pathlib\npathlib.Path("session_artifacts/uploads/p.jpg").write_bytes(base64.b64decode(b))',
   );
   assert.equal(r.ok, true, r.hits.join(", "));
+});
+
+/**
+ * Putting the pass watcher back after a break.
+ *
+ * `liveWorkCell` is memory, and nb_add_exercise was the only thing that ever
+ * set it — so "the run is the hand-in" worked on the day the exercise was
+ * built and was silently dead in every session after, because the resume
+ * brief tells the tutor (correctly) not to rebuild cells that are already
+ * there. A lesson of this length is lived across sittings.
+ */
+describe("workCellFor", () => {
+  const NB = [
+    "import marimo",
+    "app = marimo.App()",
+    "",
+    "@app.cell",
+    "def cp1_build_work(check_build, ig):",
+    "    g = ig.Graph()",
+    "    check_build(g, 7, 9)",
+    "    return",
+    "",
+    "@app.cell(hide_code=True)",
+    "def cp1_build_brief(mo):",
+    "    return",
+  ].join("\n");
+
+  test("the open checkpoint's cell is found", () => {
+    assert.equal(workCellFor(NB, "cp1_build"), "cp1_build_work");
+  });
+
+  test("a checkpoint whose exercise was never built watches nothing", () => {
+    // Otherwise the watcher polls the kernel every three seconds, all session,
+    // for a cell that does not exist.
+    assert.equal(workCellFor(NB, "cp2_edit"), null);
+  });
+
+  test("no open checkpoint, nothing to watch", () => {
+    assert.equal(workCellFor(NB, null), null);
+  });
+
+  test("a helper the student defined inside a cell is not the cell", () => {
+    // marimo writes its own `def` at column zero. An indented one is theirs.
+    const nb = "@app.cell\ndef other(mo):\n    def cp9_x_work(a):\n        return a\n";
+    assert.equal(workCellFor(nb, "cp9_x"), null);
+  });
+
+  test("an id that is not an identifier never reaches the regex", () => {
+    for (const bad of ["cp1-build", "cp1 build", "cp.*", "", "1cp"]) {
+      assert.equal(workCellFor(NB, bad), null, bad);
+    }
+  });
+
+  test("a practice round's own cell is found under its own id", () => {
+    const nb = "@app.cell\ndef cp1_build_extra_work(check_build):\n    return\n";
+    assert.equal(workCellFor(nb, "cp1_build_extra"), "cp1_build_extra_work");
+    assert.equal(workCellFor(nb, "cp1_build"), null);
+  });
 });

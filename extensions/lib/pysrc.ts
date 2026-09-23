@@ -350,3 +350,25 @@ export function kernelRefusal(hits: string[]): string {
     `and ask the student.`
   );
 }
+
+/**
+ * The work cell a resumed session should put the pass watcher back on.
+ *
+ * `<checkpoint>_work` is the name `nb_add_exercise` gives the one cell the
+ * student edits, and marimo saves every cell as `@app.cell` + a `def` at
+ * column zero — so the notebook file answers "is that cell in there?"
+ * without a kernel, which matters because this is asked at session_start
+ * while the kernel is still cold.
+ *
+ * Returns the cell name, or null when there is nothing to watch: no id, or a
+ * checkpoint whose exercise was never built. Never a name that is not really
+ * in the file — the watcher would then poll the kernel every three seconds
+ * for the whole session looking for a cell that does not exist.
+ */
+export function workCellFor(notebookSrc: string, checkpointId: string | null): string | null {
+  if (!checkpointId || !/^[A-Za-z_]\w*$/.test(checkpointId)) return null;
+  const cell = `${checkpointId}_work`;
+  // Column zero: a `def <name>_work(` indented inside another cell's body is
+  // the student's own helper function, not the cell marimo named.
+  return new RegExp(`^def ${cell}\\(`, "m").test(notebookSrc) ? cell : null;
+}
