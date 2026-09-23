@@ -424,3 +424,56 @@ export function handedInCode(workCell: string): string {
     `        ctx.run_cell(_cid)\n`
   );
 }
+
+/**
+ * Is this marimo session serving OUR notebook?
+ *
+ * The toolkit talks to a marimo on a fixed port. When a server from some
+ * other run is still holding that port — an E2E harness that died without
+ * its teardown, a previous module's session that was SIGKILLed — the toolkit
+ * connects to it happily, because it answers. What it is serving is a
+ * different notebook, in a different folder.
+ *
+ * `resolveSession` used to return a lone session without looking at its path
+ * at all, and fell back to matching the BASENAME when there were several.
+ * Every pair notebook in this course is called `notebook.py`, so the basename
+ * rule cannot tell two of them apart — it identifies a stranger's notebook as
+ * ours. Three orphaned servers from a broken harness run sat on 2718–2720 for
+ * six days, and the tutor on the other end was reading and writing cells in a
+ * temp directory nobody would ever open.
+ *
+ * So the directory has to agree, and these two normalisations are what let it:
+ *
+ *   - macOS. `/tmp` and `/var` are symlinks into `/private`, and marimo
+ *     reports the resolved path while `process.cwd()` gives the short one.
+ *     That mismatch is the whole reason the basename fallback was reached in
+ *     normal use, so removing the fallback without this would break the
+ *     ordinary case to fix the rare one.
+ *   - A relative path, resolved against the folder pi is running in, which is
+ *     the module folder.
+ */
+export function normalizeNotebookPath(p: string, cwd: string): string {
+  let out = String(p ?? "").trim();
+  if (!out) return "";
+  if (!out.startsWith("/")) out = `${cwd.replace(/\/+$/, "")}/${out}`;
+  out = out.replace(/^\/private(\/(?:var|tmp)\/)/, "$1");
+  return out.replace(/\/{2,}/g, "/");
+}
+
+/** The session serving `wantPath`, or null when none of them is ours. */
+export function pickNotebookSession(
+  sessions: Record<string, { path?: string; filename?: string }>,
+  ids: string[],
+  wantPath: string,
+  cwd: string,
+): string | null {
+  const want = normalizeNotebookPath(wantPath, cwd);
+  for (const id of ids) {
+    const s = sessions[id] ?? {};
+    for (const candidate of [s.path, s.filename]) {
+      if (!candidate) continue;
+      if (normalizeNotebookPath(candidate, cwd) === want) return id;
+    }
+  }
+  return null;
+}

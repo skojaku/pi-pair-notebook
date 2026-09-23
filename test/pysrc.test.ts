@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import {
   handedInCode,
   kernelRefusal,
+  pickNotebookSession,
   py,
   pyList,
   pyMd,
@@ -404,5 +405,77 @@ describe("handedInCode", () => {
     const extra = handedInCode("cp1_build_extra_work");
     assert.ok(extra.includes('["cp1_build_extra_helped","cp1_build_extra_help"]'));
     assert.match(extra, /name="cp1_build_extra_handed"/);
+  });
+});
+
+/**
+ * Which marimo session is ours.
+ *
+ * The toolkit talks to a fixed port, so a server from some other run that is
+ * still holding it answers like a healthy one. Three orphans from a harness
+ * that died without its teardown sat on 2718–2720 for six days. A lone
+ * session used to be adopted without a glance at what it was serving, and the
+ * fallback for several of them matched the BASENAME — and every pair notebook
+ * in this course is called notebook.py.
+ */
+describe("pickNotebookSession", () => {
+  const CWD = "/Users/s/teaching/ops/pair-notebook/m03-robustness";
+  const WANT = `${CWD}/notebook.py`;
+
+  test("our own session is found", () => {
+    const sessions = { s_a: { path: WANT, filename: WANT } };
+    assert.equal(pickNotebookSession(sessions, ["s_a"], WANT, CWD), "s_a");
+  });
+
+  test("a lone session that is NOT ours is refused", () => {
+    // The six-day-old orphan, exactly: one session, another notebook.py.
+    const other = "/private/var/folders/p1/T/tutor-e2e-boy3my/notebook.py";
+    const sessions = { s_q90q0t: { path: other, filename: other } };
+    assert.equal(pickNotebookSession(sessions, ["s_q90q0t"], WANT, CWD), null);
+  });
+
+  test("the right one is picked out of a crowd", () => {
+    const other = "/private/var/folders/p1/T/tutor-e2e-x/notebook.py";
+    const sessions = {
+      s_a: { path: other, filename: other },
+      s_b: { path: WANT, filename: WANT },
+    };
+    assert.equal(pickNotebookSession(sessions, ["s_a", "s_b"], WANT, CWD), "s_b");
+  });
+
+  test("macOS reports /private; the short path still matches", () => {
+    // /tmp and /var are symlinks into /private. marimo reports the resolved
+    // path, process.cwd() gives the short one — this mismatch is why the
+    // basename fallback was reached in ordinary use, so dropping the fallback
+    // without this would break the normal case to fix the rare one.
+    const cwd = "/var/folders/p1/T/lesson";
+    const want = `${cwd}/notebook.py`;
+    const reported = "/private/var/folders/p1/T/lesson/notebook.py";
+    assert.equal(pickNotebookSession({ s: { path: reported } }, ["s"], want, cwd), "s");
+  });
+
+  test("a relative path is resolved against the module folder", () => {
+    assert.equal(pickNotebookSession({ s: { path: "notebook.py" } }, ["s"], WANT, CWD), "s");
+  });
+
+  test("filename is consulted when path is absent", () => {
+    assert.equal(pickNotebookSession({ s: { filename: WANT } }, ["s"], WANT, CWD), "s");
+  });
+
+  test("no sessions at all is not a match", () => {
+    assert.equal(pickNotebookSession({}, [], WANT, CWD), null);
+  });
+
+  test("a neighbouring module's notebook is not ours", () => {
+    // The fault the basename rule could never see.
+    const sibling = "/Users/s/teaching/ops/pair-notebook/m02-small-world/notebook.py";
+    assert.equal(pickNotebookSession({ s: { path: sibling } }, ["s"], WANT, CWD), null);
+  });
+
+  test("doubled slashes do not decide identity", () => {
+    assert.equal(
+      pickNotebookSession({ s: { path: WANT.replace("/pair-notebook/", "//pair-notebook//") } }, ["s"], WANT, CWD),
+      "s",
+    );
   });
 });

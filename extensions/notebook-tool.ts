@@ -72,6 +72,7 @@ import {
   scanKernelCode,
   stripRedundantImports,
   handedInCode,
+  pickNotebookSession,
   workCellFor,
 } from "./lib/pysrc.ts";
 import {
@@ -829,31 +830,48 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  if (ids.length === 1) return { id: ids[0] };
-  // More than one notebook on this server: pick ours by path. Exact first —
-  // the basename rule matches any file of that name anywhere, which is a
-  // fallback for a marimo that reports paths differently, not a way to choose.
+  // Pick ours by PATH, and check even when there is only one — a lone session
+  // used to be returned without a glance at what it was serving. The port is
+  // fixed, so a server from some other run that is still holding it answers
+  // like a healthy one: an E2E harness that died without its teardown left
+  // three of them on 2718–2720 for six days, and a tutor that adopts one
+  // reads and writes a stranger's notebook while telling the student their
+  // whiteboard is fine. Refusing is the honest failure; the silent one is not
+  // a failure at all until someone opens the artifact.
+  //
+  // The basename rule this replaces could not have caught that: every pair
+  // notebook in the course is called notebook.py.
   const want = notebookPath();
-  const exact = ids.filter((id) => {
-    const s = sessions[id] ?? {};
-    return s.path === want || s.filename === want;
-  });
-  const mine = exact.length
-    ? exact
-    : ids.filter((id) => {
-        const s = sessions[id] ?? {};
-        return path.basename(s.path ?? s.filename ?? "") === path.basename(want);
-      });
-  // Ambiguity used to be fatal, and fatal here means fatal for the session:
-  // the error carried NO_NOTEBOOK, which tells the tutor to announce that the
-  // whiteboard needs restarting and finish in the terminal — over a server
-  // that is running, healthy, and holding the student's own notebook. Guessing
-  // wrong costs one cell in the wrong page; refusing costs the artifact. So
-  // take the first match and keep going.
-  if (mine.length >= 1) return { id: mine[0] };
+  const mine = pickNotebookSession(sessions, ids, want, process.cwd());
+  if (mine) return { id: mine };
+
+  // Nothing on this server matches this folder. What to do about that depends
+  // entirely on whether we know what this server IS.
+  //
+  // A server we started, or one an instructor pointed us at with MARIMO_URL:
+  // take what is there anyway. That is the old behaviour and it is forgiving
+  // on purpose — a marimo that reports paths in some way the matcher does not
+  // recognise costs one cell in the wrong page if we guess, and costs the
+  // whole artifact if we refuse.
+  //
+  // The blind default (127.0.0.1:2718, which nobody told us about) is the
+  // one worth refusing. Whatever answers there may be someone else's notebook
+  // entirely: an E2E harness that died without its teardown left three
+  // servers holding 2718-2720 for six days, each serving a temp notebook.py.
+  // A lone session used to be returned with no glance at its path at all, and
+  // the basename fallback could not have caught it either, because every pair
+  // notebook in this course is called notebook.py — so the tutor would have
+  // read and written a stranger's notebook while telling the student their
+  // whiteboard was fine. "unreachable" rather than "ambiguous", because the
+  // caller restarts the server on that and a restart moves us off the
+  // squatted port; nothing ever retries an ambiguity.
+  const knownServer = /^https?:\/\/\S+$/.test(process.env.MARIMO_URL ?? "");
+  if (knownServer && ids.length >= 1) return { id: ids[0] };
   return {
-    reason: "ambiguous",
-    error: `No open notebook matches this folder (${ids.length} on the server). ${NO_NOTEBOOK}`,
+    reason: "unreachable",
+    error:
+      `The notebook server on the default port is serving a different notebook ` +
+      `(${ids.length} open, none in this folder). ${NO_NOTEBOOK}`,
   };
 }
 
@@ -6837,35 +6855,64 @@ export default function (pi: ExtensionAPI) {
       } catch {
         // best-effort
       }
-      let code =
+      const result = await runKernel(
         `import marimo._code_mode as cm\n` +
-        `async with cm.get_context() as ctx:\n` +
-        `    for _c in list(ctx.cells):\n` +
-        `        if _c.name and _c.name != "_":\n` +
-        `            ctx.delete_cell(_c.id)\n` +
-        // Say out loud what survived. A wipe that silently leaves a cell
-        // behind is how a "clean slate" notebook opens on the middle of the
-        // module — the tutor must know before it starts building.
-        `    _left = [c.name for c in ctx.cells if c.name and c.name != "_"]\n` +
-        `    if _left:\n` +
-        `        print("STILL THERE (delete failed):", ", ".join(_left))\n`;
-      // Same kernel call as the wipe so the chapter header lands first,
-      // before any cp0/cp1 build cells.
-      try {
-        const chapters = loadChapters();
-        if (chapters.length > 0) {
-          const h = `${chapters[0].id}_header`;
-          const heading = `## Chapter 1 of ${chapters.length} — ${chapters[0].title}`;
-          const op = chapterOpening(chapters[0]);
-          const body = `mo.md(${pyMd(op ? `${heading}\n\n${op}` : heading)})`;
-          code +=
-            `    _cid = ctx.create_cell(${py(body)}, name=${py(h)}, hide_code=True)\n` +
-            `    ctx.run_cell(_cid)\n`;
+          `async with cm.get_context() as ctx:\n` +
+          `    for _c in list(ctx.cells):\n` +
+          `        if _c.name and _c.name != "_":\n` +
+          `            ctx.delete_cell(_c.id)\n`,
+        signal,
+      );
+      // Say out loud what survived. A wipe that silently leaves a cell behind
+      // is how a "clean slate" notebook opens on the middle of the module.
+      //
+      // A SECOND call, because `ctx.cells` is a snapshot taken when the
+      // context opened. Read after the deletes in the same block it lists
+      // every cell that was just removed, so a clean wipe accused itself:
+      // "STILL THERE (delete failed): ch1_header, cp1_build_brief, ..." —
+      // named beside the "deleted cell 'MJUe'" lines that had just deleted
+      // them, on every fresh start there has ever been.
+      if (!result.failed) {
+        const left = await runKernel(
+          `import marimo._code_mode as cm\n` +
+            `async with cm.get_context() as ctx:\n` +
+            `    _left = [c.name for c in ctx.cells if c.name and c.name != "_"]\n` +
+            `    if _left:\n` +
+            `        print("STILL THERE (delete failed):", ", ".join(_left))\n`,
+          signal,
+        );
+        if (!left.failed && left.out.trim()) {
+          result.out = `${result.out}\n${left.out}`.trim();
         }
-      } catch {
-        // header is cosmetic
       }
-      const result = await runKernel(code, signal);
+      // The chapter header used to be appended to the wipe's own kernel call,
+      // "so it lands first, before any cp0/cp1 build cells". ensureWarm's
+      // docstring had already written down why that cannot work: a created
+      // cell must not share a code-mode context with the run that defines
+      // what it uses, because "queued runs inside one code-mode context do
+      // not reliably execute before a newly created cell (observed in
+      // production: new cell ran first and hit NameError on `mo`)".
+      //
+      // Which is what a fresh start hit, every time, eleven seconds into a
+      // session whose sandbox alone takes ten to compile: `mo` was not
+      // defined yet, the header raised, the whole call came back as
+      // NOTEBOOK ERROR, and the student read "⚠ something hiccuped" twice
+      // and then lost the whiteboard for the rest of the lesson.
+      //
+      // insertChapterHeader warms the kernel first and is skip-if-exists, so
+      // it still lands before anything the tutor builds next; when the kernel
+      // is not warm enough yet it says so, and the scheduler retries.
+      if (!result.failed) {
+        try {
+          const chs = loadChapters();
+          if (chs.length > 0) {
+            const landed = await insertChapterHeader(chs[0], 1, chs.length, signal);
+            if (!landed) scheduleChapterHeader(chs[0], 1, chs.length);
+          }
+        } catch {
+          // headers are cosmetic — never fail a fresh start over one
+        }
+      }
       if (!result.failed) await pinFurnitureToBottom(signal);
       if (!result.failed) {
         result.out =
