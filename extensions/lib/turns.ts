@@ -34,3 +34,12 @@ export function announcesClose(text: string): boolean {
   }
   return false;
 }
+
+/**
+ * Is the student asking for the referee? The word is "judge" — the one the
+ * course tells them — or "referee", or the /judge command. Whole words only:
+ * "judgement" in a sentence about their code is not a request.
+ */
+export function callsReferee(text: string): boolean {
+  return /(^|\s)\/judge\b|\bjudge\b|\breferee\b|ジャッジ/i.test(text);
+}

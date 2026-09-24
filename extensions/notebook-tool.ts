@@ -76,7 +76,7 @@ import {
   cellSource,
   cellNames,
 } from "./lib/pysrc.ts";
-import { announcesClose } from "./lib/turns.ts";
+import { announcesClose, callsReferee } from "./lib/turns.ts";
 import {
   chooseNotebook,
   DEFAULT_NOTEBOOK,
@@ -197,6 +197,36 @@ const tutoredModule = (): boolean => loadChapters().length > 0;
  *                     no business being minted by an agent in that repo. The
  *                     team's own `git` is right there — bash stays on.
  */
+// Every tool this extension registers. In a lesson these, and the few
+// tools listed in allowedInLesson(), are the ONLY ones the tutor keeps.
+const TOOLKIT_TOOLS = [
+  "chapter_done", "checkpoint_done", "log_detour", "nb_add_cell", "nb_add_exercise",
+  "nb_add_template", "nb_delete_cell", "nb_edit_cell", "nb_fresh_start",
+  "nb_notebook_url", "nb_read_code", "nb_read", "nb_run", "nb_submit",
+  "nb_update_setup", "nb_view_image", "session_recall", "call_referee",
+];
+
+/**
+ * What else a tutor may keep during a lesson.
+ *
+ * It used to be a blocklist of one — bash. But pi loads every package the
+ * machine's own settings list, and on an instructor's machine that was a
+ * sandbox runner (context-mode's ctx_execute / ctx_execute_file), subagents
+ * and a speech-style package. In a live m03 run the tutor used
+ * ctx_execute_file to open bench.py — the file with every answer in it —
+ * and the call was printed on the student's screen. So it is an allowlist:
+ * the toolkit's own tools, the choice dialog, `read` (skills are read with
+ * it), and a fetch tool (the quiz skill fetches the lecture notes).
+ */
+function allowedInLesson(name: string): boolean {
+  return (
+    TOOLKIT_TOOLS.includes(name) ||
+    /ask.?user.?question/i.test(name) ||
+    name === "read" ||
+    /fetch/i.test(name)
+  );
+}
+
 const LESSON_ONLY_TOOLS = [
   "nb_add_template",
   "nb_add_exercise",
@@ -504,7 +534,7 @@ function startMarimo(): Promise<{ url?: string; error?: string }> {
     try {
       child = spawn(
         "uvx",
-        ["marimo", "edit", "--sandbox", "--no-token", "--headless", NOTEBOOK_FILE],
+        [...marimoFrom(), "marimo", "edit", "--sandbox", "--no-token", "--headless", NOTEBOOK_FILE],
         // Its own process group, so stopMarimo can take down the whole
         // uv -> python -> marimo chain rather than just the wrapper.
         { cwd, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] },
@@ -921,6 +951,26 @@ async function readHiddenCheck(
   if (!m) return { verdict: "none" };
   const why = (m[2] ?? "").trim().replace(/&quot;/g, '"').replace(/&amp;/g, "&");
   return { verdict: m[1] as any, ...(why ? { why } : {}) };
+}
+
+/**
+ * `uvx --from marimo==X` when the module pins a marimo version.
+ *
+ * A bare `uvx marimo` runs whatever marimo is newest the day the student
+ * starts, and a module's stylesheet leans on marimo's own page structure.
+ * In a live m03 run the server came up on 0.25.0 while every look had been
+ * checked on 0.24.2. `"marimo_version": "0.25.0"` in lesson/index.json
+ * pins the server to the version the module was checked against.
+ */
+function marimoFrom(): string[] {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
+    const v = JSON.parse(raw).marimo_version;
+    if (typeof v === "string" && /^\d+\.\d+\.\d+$/.test(v)) return ["--from", `marimo==${v}`];
+  } catch {
+    /* no lesson, or no pin: newest marimo, as before */
+  }
+  return [];
 }
 
 async function runKernel(
@@ -3277,6 +3327,22 @@ async function pinFurnitureToBottom(signal?: AbortSignal): Promise<void> {
     await runKernel(
       `import marimo._code_mode as cm\n` +
         `async with cm.get_context() as ctx:\n` +
+        // The one import every cell leans on. In a live m03 run the cell that
+        // held `import marimo as mo` was gone by the end, and every cell that
+        // renders anything — the buttons, the charts, the progress bar —
+        // failed with "name 'mo' is not defined". How it went is not known
+        // yet; that it can go is, so it is put back whenever a cell is added.
+        `    if not any("import marimo as mo" in (c.code or "") for c in ctx.cells):\n` +
+        `        _mo = ctx.create_cell("# tutor:plumbing — kept below the lesson; see the note above.\\nimport marimo as mo", hide_code=True)\n` +
+        `        ctx.run_cell(_mo)\n` +
+        // Present is not enough: measured on marimo 0.25, a notebook the
+        // toolkit reached before any browser did can sit with every plumbing
+        // cell "stale" — never run — and then every cell added after it fails
+        // on a name those cells would have defined ("name 'mo' is not
+        // defined"), which is how Submit to Tutor vanished at cp3 and cp4.
+        `    for _c in ctx.cells:\n` +
+        `        if "tutor:plumbing" in (_c.code or "") and str(_c.status) == "stale":\n` +
+        `            ctx.run_cell(_c.id)\n` +
         `    _ids = [c.id for c in ctx.cells]\n` +
         `    _plumb = [c.id for c in ctx.cells if "tutor:plumbing" in c.code]\n` +
         `    _app = [c.id for c in ctx.cells if "tutor_stuck_send" in c.code]\n` +
@@ -3351,40 +3417,10 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `        if _kind in ("send", "sent", "help", "helped", "check"):\n` +
         `            ctx.delete_cell(_name)\n` +
         `            _done.append(_name)\n` +
-        `        elif _kind == "work" and _name in _open:\n` +
-        // Config only, no code: the guard that can refuse a body never runs.
-        // Folding an already-folded cell is a write to the file for nothing,
-        // and every write is a line in the student's git history.
-        `            ctx.edit_cell(_name, hide_code=True)\n` +
-        `            _done.append(_name)\n` +
-        `        elif _kind in ("brief", "note") and "mo.accordion(" not in _code:\n` +
-        `            try:\n` +
-        `                _arg = ast.parse(_code, mode="eval").body.args[0]\n` +
-        `                _text = ast.literal_eval(_arg)\n` +
-        `                _seg = ast.get_source_segment(_code, _arg)\n` +
-        `            except Exception:\n` +
-        `                continue\n` +
-        `            if not _seg:\n` +
-        `                continue\n` +
-        // The heading the cell already carries — "### Exercise: a network in
-        // nine pairs", "### 📐 Where the seven came from". A fold with a
-        // label of its own invents a second name for the same checkpoint.
-        `            _head = ""\n` +
-        `            for _line in _text.splitlines():\n` +
-        `                if _line.lstrip().startswith("#"):\n` +
-        `                    _head = _line.lstrip().lstrip("#").strip()\n` +
-        `                    break\n` +
-        `            if not _head:\n` +
-        `                continue\n` +
-        `            if _kind == "brief":\n` +
-        `                _head = "\\u2705 " + _head\n` +
-        // A note heading often opens with an emoji of its own. Two in a row
-        // is a label that reads as decoration before it reads as a name.
-        `            elif _head[:1].isascii():\n` +
-        `                _head = "\\U0001F4DD " + _head\n` +
-        `            ctx.edit_cell(_name, "mo.accordion({%r: mo.md(%s)})" % (_head, _seg))\n` +
-        `            ctx.run_cell(_name)\n` +
-        `            _done.append(_name)\n` +
+        // Nothing is folded any more: the brief, the student's code and the
+        // note stay as they are. Focus mode (the module's stylesheet) shows
+        // only the exercise in hand, which is what folding was for, and a
+        // student who turns it off gets the whole notebook back unfolded.
         `    print("folded:", ", ".join(_done) if _done else "nothing to fold")\n`,
       signal,
     );
@@ -4208,8 +4244,9 @@ export default function (pi: ExtensionAPI) {
     // because the toolkit is afraid of one.
     try {
       const active: string[] = pi.getActiveTools?.() ?? [];
-      const unwanted = tutoredModule() ? ["bash"] : LESSON_ONLY_TOOLS;
-      const keep = active.filter((n) => !unwanted.includes(n));
+      const keep = tutoredModule()
+        ? active.filter(allowedInLesson)
+        : active.filter((n) => !LESSON_ONLY_TOOLS.includes(n));
       if (keep.length !== active.length) pi.setActiveTools?.(keep);
     } catch {
       /* an older pi without tool management: AGENTS.md still forbids it */
@@ -4859,7 +4896,30 @@ export default function (pi: ExtensionAPI) {
   // session after its first fire. It gets its own handler now.
   pi.on("message_end", async (event: any) => {
     runawayFired = false;
-    if (event?.message?.role === "user") closedSinceStudent = false;
+    if (event?.message?.role === "user") {
+      closedSinceStudent = false;
+      // ── "judge" in the terminal calls the referee ──────────────────────
+      // The ⚖️ box sits at the bottom of a notebook the student may not be
+      // looking at, and in a live m03 run a student typed "call a judge"
+      // and nothing happened. The appeal is against the tutor, so it does
+      // not go through the tutor: the word itself starts the referee, the
+      // same way the button does, with their message as the case.
+      const parts = Array.isArray(event.message.content) ? event.message.content : [];
+      const said = parts
+        .filter((x: any) => x?.type === "text")
+        .map((x: any) => String(x.text ?? ""))
+        .join(" ")
+        .trim();
+      if (tutoredModule() && callsReferee(said)) {
+        try {
+          fs.mkdirSync(path.join(process.cwd(), "session_artifacts"), { recursive: true });
+          fs.writeFileSync(path.join(process.cwd(), "session_artifacts", "appeal.txt"), said);
+        } catch {
+          /* the referee still runs on "(no details given)" */
+        }
+        void handleAppeal(pi);
+      }
+    }
   });
 
   // ── The breath before a drawing, and why it is not here any more ─────────
@@ -7308,6 +7368,42 @@ export default function (pi: ExtensionAPI) {
   // marimo writes edit-mode saves on every run, so what is on disk is what
   // they last ran. A cell they typed into and never ran reads as the scaffold,
   // which is correct: nothing was run, so there is nothing to judge yet.
+  // ── call_referee ──────────────────────────────────────────────────────────
+  // The student can also ask for the referee in their own words ("can a
+  // judge look at this?"). Typing the word "judge" starts it directly; this
+  // is for every other way of asking.
+  pi.registerTool({
+    name: "call_referee",
+    label: "Call the referee",
+    description:
+      "Call the referee — a second, stronger model that reviews the session and gives a " +
+      "binding ruling. Use it ONLY when the student asks for a referee or judge, or asks " +
+      "for someone else to look at a disagreement with you. Pass their request in their " +
+      "own words. Then say one short line that the referee is looking at it, and stop.",
+    promptSnippet: "Call the referee when the student asks for one",
+    parameters: Type.Object({
+      status: STATUS_PARAM,
+      request: Type.String({ description: "The student's request, in their own words." }),
+    }),
+    async execute(_id, params) {
+      try {
+        fs.mkdirSync(path.join(process.cwd(), "session_artifacts"), { recursive: true });
+        fs.writeFileSync(
+          path.join(process.cwd(), "session_artifacts", "appeal.txt"),
+          String(params.request ?? "").trim() || "(no details given)",
+        );
+      } catch {
+        /* the referee still runs on "(no details given)" */
+      }
+      void handleAppeal(pi);
+      return toResult({
+        out: "The referee is reviewing the session. Its ruling arrives as a message; follow it.",
+        failed: false,
+      });
+    },
+    ...quiet("Calling the referee…"),
+  });
+
   pi.registerTool({
     name: "nb_read_code",
     label: "Read a student's cell",
