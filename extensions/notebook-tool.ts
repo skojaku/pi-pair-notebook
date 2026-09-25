@@ -6754,6 +6754,25 @@ export default function (pi: ExtensionAPI) {
           liveWorkRestored = false;
         }
         if (!cmResult.failed) await pinFurnitureToBottom(signal);
+        // ── The cells that never ran ─────────────────────────────────────
+        // Seen live on marimo 0.25: cp3's Submit to Tutor and the line under
+        // it were created and asked to run, and sat "queued" for good — the
+        // student had no button. The brief above them stayed "stale". Asking
+        // again ran them at once. Why the first request stalls is not known;
+        // that a second one works is, so after a moment every cell of this
+        // exercise that is still queued or stale is run again.
+        if (!cmResult.failed) {
+          await new Promise((r) => setTimeout(r, 1500));
+          await runKernel(
+            `import marimo._code_mode as cm\n` +
+              `async with cm.get_context() as ctx:\n` +
+              `    for _c in ctx.cells:\n` +
+              `        if _c.name in ${pyList([name + "_brief", name + "_send", name + "_sent", name + "_cue"])} and str(_c.status) in ("queued", "stale"):\n` +
+              `            ctx.run_cell(_c.id)\n` +
+              `    print("ok")\n`,
+            signal,
+          ).catch(() => undefined);
+        }
         if (!cmResult.failed) {
           cmResult.out =
             (wakesOnRun()
