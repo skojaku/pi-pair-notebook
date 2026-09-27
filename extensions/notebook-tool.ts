@@ -3376,9 +3376,10 @@ async function pinFurnitureToBottom(signal?: AbortSignal): Promise<void> {
  * So the desk is cleared as new work arrives. For every checkpoint but the
  * one being built:
  *
- *   <id>_brief   rewritten as `mo.accordion({…})` — one line, click to open
- *   <id>_note    the same
+ *   <id>_brief   left alone — a module folds it in its own markdown
+ *   <id>_note    left alone — it is written as an accordion already
  *   <id>_work    `hide_code` — marimo's own fold, one click from their code
+ *   <id>_check   deleted; nobody is left for it to report to
  *   <id>_send    deleted; a finished checkpoint's Submit button does nothing
  *   <id>_sent    deleted with it — it is the button's own caption
  *
@@ -3417,10 +3418,17 @@ async function foldFinishedCheckpoints(keep: string, signal?: AbortSignal): Prom
         `        if _kind in ("send", "sent", "help", "helped", "check"):\n` +
         `            ctx.delete_cell(_name)\n` +
         `            _done.append(_name)\n` +
-        // Nothing is folded any more: the brief, the student's code and the
-        // note stay as they are. Focus mode (the module's stylesheet) shows
-        // only the exercise in hand, which is what folding was for, and a
-        // student who turns it off gets the whole notebook back unfolded.
+        // A finished exercise's code folds to marimo's own one-click fold.
+        // It was unfolded when focus mode took over (86afd32); m03's author
+        // asked for it back, so a student with focus mode off reads their
+        // finished work by opening it. Config only, no code: the guard that
+        // can refuse a body never runs, and an already-folded cell is left
+        // alone — every write is a line in the student's git history. The
+        // brief and the note fold in the module's own markdown (a `details`
+        // block, an accordion), so nothing here rewrites them.
+        `        elif _kind == "work" and _name in _open:\n` +
+        `            ctx.edit_cell(_name, hide_code=True)\n` +
+        `            _done.append(_name)\n` +
         `    print("folded:", ", ".join(_done) if _done else "nothing to fold")\n`,
       signal,
     );
