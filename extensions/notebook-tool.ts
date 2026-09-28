@@ -2266,7 +2266,8 @@ async function insertChapterHeader(
     if (warm) return false;
     const name = `${ch.id}_header`;
     const opening = chapterOpening(ch);
-    const heading = `## Chapter ${num} of ${total} — ${ch.title}`;
+    // A module taught as one chapter has no "Chapter 1 of 1": just its title.
+    const heading = total === 1 ? `## ${ch.title}` : `## Chapter ${num} of ${total} — ${ch.title}`;
     const body = `mo.md(${pyMd(opening ? `${heading}\n\n${opening}` : heading)})`;
     await runKernel(
       `import marimo._code_mode as cm\n` +
