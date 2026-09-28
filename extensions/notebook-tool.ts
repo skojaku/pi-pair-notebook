@@ -76,7 +76,7 @@ import {
   cellSource,
   cellNames,
 } from "./lib/pysrc.ts";
-import { announcesClose, callsReferee } from "./lib/turns.ts";
+import { announcesClose, callsReferee, revealSaid } from "./lib/turns.ts";
 import {
   chooseNotebook,
   DEFAULT_NOTEBOOK,
@@ -136,6 +136,7 @@ const NOTEBOOK_IO: NotebookIO = {
 function resolveNotebook(): NotebookChoice {
   const cwd = process.cwd();
   const hasDefault = fs.existsSync(path.join(cwd, DEFAULT_NOTEBOOK));
+  const isModule = fs.existsSync(path.join(cwd, "notebook.template.py"));
   let config: unknown;
   try {
     config = JSON.parse(fs.readFileSync(path.join(cwd, "pair-notebook.json"), "utf-8"))?.notebook;
@@ -146,9 +147,10 @@ function resolveNotebook(): NotebookChoice {
     env: process.env.PAIR_NOTEBOOK_FILE,
     config,
     hasDefault,
+    isModule,
     // Only when the first three rules cannot answer. In a module folder this
-    // never runs at all.
-    found: hasDefault || safeNotebookPath(config) || safeNotebookPath(process.env.PAIR_NOTEBOOK_FILE)
+    // never runs at all — not even on the first run, before notebook.py exists.
+    found: hasDefault || isModule || safeNotebookPath(config) || safeNotebookPath(process.env.PAIR_NOTEBOOK_FILE)
       ? []
       : findNotebooks(cwd, NOTEBOOK_IO),
   });
@@ -2971,6 +2973,30 @@ function tutorSpokeSinceStudent(ctx: any): boolean {
   return true;
 }
 
+/**
+ * Everything the tutor said in this checkpoint: its text, back to the last
+ * checkpoint_done's RESULT (the call being made now has none yet) or the
+ * start of the transcript. For revealSaid — see lib/turns.ts.
+ */
+function tutorTextsThisCheckpoint(ctx: any): string[] {
+  const out: string[] = [];
+  try {
+    const entries: any[] = ctx?.sessionManager?.getBranch?.() ?? [];
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const m = entries[i]?.type === "message" ? entries[i].message : null;
+      if (!m) continue;
+      if (m.role === "toolResult" && m.toolName === "checkpoint_done") break;
+      if (m.role === "assistant") {
+        const t = partsText(m.content);
+        if (t) out.push(t);
+      }
+    }
+  } catch {
+    /* unreadable: nothing heard, and the flag stays as it was */
+  }
+  return out.reverse();
+}
+
 /** Names of every cell currently in the notebook, or null if unreadable. */
 /**
  * Questions the student asked that are already recorded as detours. Their own
@@ -4386,10 +4412,19 @@ export default function (pi: ExtensionAPI) {
                         `not re-run any checkpoint. Say one warm line that you are just ` +
                         `filing their work, call chapter_done to write the closing record, ` +
                         `and then say goodbye.`)
+                  // "Remind them where you left off" once came out as "You
+                  // finished the igraph walkthrough, so the exercises begin
+                  // now. Let me set up the first one." — the second sentence
+                  // is narration of the build that follows, which every
+                  // module's contract forbids. So the brief says what the one
+                  // sentence is FOR, and that the build comes with nothing
+                  // said before it.
                   : `If they continue: do NOT rebuild existing notebook cells ` +
-                    `(nb_add_template skips duplicates automatically), remind them in one ` +
-                    `sentence where you two left off, and continue at checkpoint ${nextId} ` +
-                    `(chapter "${chapter.title}").`),
+                    `(nb_add_template, nb_add_exercise and nb_add_cell skip a name that is ` +
+                    `already there), say ONE sentence naming what they finished last, and ` +
+                    `then continue at checkpoint ${nextId} (chapter "${chapter.title}"), ` +
+                    `following its script as in any other checkpoint. Say nothing about what you are about to ` +
+                    `build or do: the tools print their own lines.`),
               display: false,
             },
             { deliverAs: "nextTurn" },
@@ -5195,7 +5230,14 @@ export default function (pi: ExtensionAPI) {
       // The rule itself lives where it holds — the chapter script, which now
       // spells out the reveal's words at the sites this fired on.
       const revealDue = !!scriptedReveal(baseCheckpointId(id));
-      const spokeSince = revealDue ? tutorSpokeSinceStudent(ctx) : true;
+      // Either shape is a spoken reveal: words since the student last typed
+      // (m02: the reveal follows their answer), or the reveal's own lines
+      // anywhere in this checkpoint (m03: reveal, "any questions?", "no",
+      // then a close with nothing more to say).
+      const spokeSince = revealDue
+        ? tutorSpokeSinceStudent(ctx) ||
+          revealSaid(scriptedReveal(baseCheckpointId(id)), tutorTextsThisCheckpoint(ctx))
+        : true;
       // Peek, don't consume: a refusal below must leave the transcript mark
       // where it was, or the retry would log an empty student_said_verbatim.
       const said = studentSaidSince(ctx, false);
@@ -6121,7 +6163,10 @@ export default function (pi: ExtensionAPI) {
             }
           }
           const shows =
-            /netviz\s*\(|mo\.ui\.|mo\.image\s*\(|alt\.Chart|sns\.\w+\s*\(|plt\.\w+\s*\(/.test(src);
+            // draw_*/plot_*: a module's own picture helpers (m03's draw_net,
+            // plot_ccdf, …). A draw_net souvenir was refused twice as "prose
+            // only", and the row still said so after it went in.
+            /netviz\s*\(|mo\.ui\.|mo\.image\s*\(|alt\.Chart|sns\.\w+\s*\(|plt\.\w+\s*\(|\b(?:draw|plot)_\w+\s*\(/.test(src);
           // BOTH faults, and the QUOTE first. `gap` carried one message and
           // `!shows` won the ternary, so a markdown-table souvenir always
           // reported "is prose only" and a missing quote was never mentioned —
@@ -6310,11 +6355,22 @@ export default function (pi: ExtensionAPI) {
         : sanitize(wanted)
             .replace(/^(?=\d)/, "c_")
             .replace(/^_+$/, "cell") || "cell";
-      let inner =
+      // A name that is already a cell is not made twice. On a resume the
+      // tutor re-issues a checkpoint's build from the top, and nb_add_exercise
+      // skips its own cells — but the scratch cell went through here and a
+      // resumed m03 notebook carried two `def cp1_build_scratch(...)`, which
+      // marimo then refuses as a redefinition of the same cell name.
+      const inner =
         `async with cm.get_context() as ctx:\n` +
-        `    _cid = ctx.create_cell(_code, name=${py(name)}, hide_code=${hide})\n` +
-        `    ctx.run_cell(_cid)\n`;
-      inner += focusCellCode("_cid", "    ");
+        `    if ${py(name)} in [c.name for c in ctx.cells]:\n` +
+        `        print(${py(
+          `ALREADY IN THE NOTEBOOK — a cell named '${name}' exists, so no second one was made. ` +
+            `Use nb_edit_cell to change it, or pick a new name for a new cell.`,
+        )})\n` +
+        `    else:\n` +
+        `        _cid = ctx.create_cell(_code, name=${py(name)}, hide_code=${hide})\n` +
+        `        ctx.run_cell(_cid)\n` +
+        focusCellCode("_cid", "        ");
       // ── The quote line is not the model's to write ───────────────────────
       // Stripped whether or not the transcript backs it. An unbacked one is
       // the Blocker in #5; a BACKED one is the fault an m02 run produced, where

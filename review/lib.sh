@@ -36,3 +36,30 @@ try:
 except Exception:
     print(raw, end="")'
 }
+
+split_pane() { # split_pane <base_pane> <cwd> [--env K=V ...]  -> prints the new pane id
+  local base="$1" cwd="$2"; shift 2
+  herdr pane split --pane "$base" --direction down --ratio 0.5 \
+    --cwd "$cwd" "$@" --no-focus |
+    python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])"
+}
+
+start_tutor() { # start_tutor <agent> <pane> -- <pi args...>
+  # A freshly split pane can still be starting its shell when `agent start`
+  # looks at it, and herdr 0.9 refuses with agent_pane_busy. Nothing was typed
+  # into the pane then, so trying again is safe; any other failure is not
+  # retried, because it may have launched pi already.
+  local agent="$1" pane="$2" out try
+  shift 2; [ "${1:-}" = "--" ] && shift
+  for try in 1 2 3 4 5; do
+    if out=$(herdr agent start "$agent" --kind pi --pane "$pane" --timeout 120000 -- "$@" 2>&1); then
+      return 0
+    fi
+    case "$out" in
+      *agent_pane_busy*) echo "note: pane $pane not at its prompt yet, retrying ($try/5)" >&2; sleep 3 ;;
+      *) echo "$out" >&2; return 1 ;;
+    esac
+  done
+  echo "$out" >&2
+  return 1
+}

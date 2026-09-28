@@ -43,3 +43,36 @@ export function announcesClose(text: string): boolean {
 export function callsReferee(text: string): boolean {
   return /(^|\s)\/judge\b|\bjudge\b|\breferee\b|ジャッジ/i.test(text);
 }
+
+/**
+ * Was a checkpoint's scripted reveal SAID, in any of these tutor texts?
+ *
+ * `closed_without_speaking` asked only "has the tutor said anything since the
+ * student last typed?". That is the right question for m02's shape, where
+ * the reveal is owed after the student's answer. m03's is different: the
+ * reveal comes with the pass, then "Do you have any questions about this
+ * exercise before we move on?", and a "no" is followed by a silent close — as
+ * the script asks. A fully correct m03 run was stamped
+ * `closed_without_speaking` on every one of its six rows.
+ *
+ * So the flag also looks for the reveal itself, anywhere in the checkpoint.
+ * The reveal's ➤ lines are its words (the rest is for the note cell); a
+ * reveal with no ➤ is taken whole. Each counts as said when its first six
+ * words appear in order in what the tutor said, compared on letters and
+ * digits only — the scripts ask for the lines as written, and a marker, a
+ * backtick or a line break the tutor dropped is not a different sentence.
+ */
+export function revealSaid(reveal: string, spoken: string[]): boolean {
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const heard = ` ${norm(spoken.join("\n"))} `;
+  const lines = reveal.includes("➤")
+    ? reveal.split("➤").slice(1)
+    : [reveal];
+  for (const line of lines) {
+    const words = norm(line).split(" ").filter(Boolean).slice(0, 6);
+    if (words.length < 3) continue;
+    if (heard.includes(` ${words.join(" ")} `)) return true;
+  }
+  return false;
+}

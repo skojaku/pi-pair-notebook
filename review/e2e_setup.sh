@@ -17,6 +17,7 @@
 # connects, which is why D7 was so hard to reproduce: the way to test a
 # notebook that is down is to stop the server, not to withhold the browser.
 set -euo pipefail
+. "$(dirname "$0")/lib.sh"
 
 MODULE_DIR=$(cd "${1:?usage: e2e_setup.sh <module_dir> [agent_name]}" && pwd)
 AGENT="${2:-tutor-e2e-$$}"
@@ -345,16 +346,24 @@ print((free or panes)[0]['pane_id'])
 BASE_PANE="${E2E_HERDR_PANE:-$(pane_pick "${E2E_HERDR_WORKSPACE:-}")}"
 [ -n "$BASE_PANE" ] || { echo "error: no herdr pane to split from" >&2; exit 1; }
 
-PANE=$(herdr pane split --pane "$BASE_PANE" --direction down --ratio 0.5 \
-  --cwd "$SANDBOX" "${ENVS[@]}" --no-focus |
-  python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])")
+PANE=$(split_pane "$BASE_PANE" "$SANDBOX" "${ENVS[@]}")
 [ -n "$PANE" ] || { echo "error: herdr pane split gave no pane id" >&2; exit 1; }
 echo "note: tutor pane $PANE (split off $BASE_PANE)" >&2
 
-herdr agent start "$AGENT" --kind pi --pane "$PANE" --timeout 120000 \
-  -- --model "$TUTOR_MODEL" --thinking low -a \
-     --no-skills --no-prompt-templates \
-     --no-extensions "${EXTS[@]}" "$KICKOFF" >/dev/null
+TUTOR_ARGS=(--model "$TUTOR_MODEL" --thinking low -a
+            --no-skills --no-prompt-templates
+            --no-extensions "${EXTS[@]}" "$KICKOFF")
+# The exact launch, kept for e2e_resume.sh. D6 used to say "re-run the herdr
+# agent start line by hand", and a hand-typed relaunch dropped the -e for the
+# module's declared packages: the resumed tutor had no ask_user_question, wrote
+# continue-or-fresh as plain text, and that read as a tutor fault (P8).
+{
+  printf 'TUTOR_ARGS=('; printf '%q ' "${TUTOR_ARGS[@]}"; echo ')'
+  printf 'PANE_ENVS=('; printf '%q ' "${ENVS[@]}"; echo ')'
+  printf 'BASE_PANE=%q\n' "$BASE_PANE"
+} >"$SANDBOX/e2e-launch.env"
+
+start_tutor "$AGENT" "$PANE" -- "${TUTOR_ARGS[@]}" || exit 1
 
 if [ -z "$MARIMO_URL" ]; then
   # The extension starts it; wait so the other scripts have a URL to talk to,

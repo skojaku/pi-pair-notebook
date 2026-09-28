@@ -21,10 +21,16 @@
  *      once, in its own file, and every student who clones it agrees. NOT
  *      `.pi/settings.json`: that file is what makes pi start at all, and an
  *      unknown key in it is a gamble taken on fifty machines at once.
- *   3. `notebook.py`, when it is there — every module folder, unchanged.
+ *   3. `notebook.py`, when it is there — or when the folder is a tutored
+ *      module (it has `notebook.template.py`), where `notebook.py` is the
+ *      file the first run creates from that template.
  *   4. the one marimo notebook in the folder, when there is exactly one.
- *      Zero configuration for the common mini-project, and it cannot fire in
- *      a module folder because rule 3 already answered.
+ *      Zero configuration for the common mini-project. It must never fire in
+ *      a module folder: on a student's FIRST run there is no `notebook.py`
+ *      yet, and m03 once carried a second marimo file at its root (an igraph
+ *      walkthrough). Rule 4 adopted it, `notebook.py` was never made from
+ *      the template, and cp1 died on `NameError: protect`. "Rule 3 already
+ *      answered" was true only from the second run on.
  *   5. `notebook.py` anyway. Nothing was found, so the caller fails with the
  *      message it has always had rather than a new one about configuration.
  *
@@ -147,6 +153,8 @@ export function chooseNotebook(input: {
   config?: unknown;
   /** Does notebook.py exist in the folder? */
   hasDefault: boolean;
+  /** Is the folder a tutored module (notebook.template.py beside it)? */
+  isModule?: boolean;
   /** Marimo notebooks the caller found, as relative paths. */
   found?: string[];
 }): NotebookChoice {
@@ -154,7 +162,7 @@ export function chooseNotebook(input: {
   if (env) return { file: env, from: "env" };
   const config = safeNotebookPath(input.config);
   if (config) return { file: config, from: "config" };
-  if (input.hasDefault) return { file: DEFAULT_NOTEBOOK, from: "default" };
+  if (input.hasDefault || input.isModule) return { file: DEFAULT_NOTEBOOK, from: "default" };
   const found = (input.found ?? []).filter((f) => safeNotebookPath(f));
   if (found.length === 1) return { file: found[0], from: "found" };
   return {

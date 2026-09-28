@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { announcesClose, callsReferee } from "../extensions/lib/turns.ts";
+import { announcesClose, callsReferee, revealSaid } from "../extensions/lib/turns.ts";
 
 test("the live case: the close said, not done", () => {
   assert.ok(announcesClose("You had it. The checkpoint closes now."));
@@ -27,4 +27,19 @@ test("the student's word for the referee", () => {
   assert.ok(callsReferee("ジャッジを呼んで"));
   assert.equal(callsReferee("my judgement was that n is 7"), false);
   assert.equal(callsReferee("I think the answer is 0.5"), false);
+});
+
+test("m03's reveal, said the turn before the questions check", () => {
+  const reveal =
+    "Say ONLY the ➤ lines. The rest is the note cell's.\n" +
+    "➤ A network is two lists: its nodes and its edges. `n` sets the\n" +
+    "nodes, so a node with no edges still exists.\n";
+  const said = [
+    "Your code asks g for its size instead of typing 7.",
+    "A network is two lists: its nodes and its edges. n sets the nodes, so a node with no edges still exists.\n\nDo you have any questions about this exercise before we move on?",
+  ];
+  assert.ok(revealSaid(reveal, said));
+  assert.ok(revealSaid(reveal, ["➤ A network is two lists — its nodes and its edges."]));
+  assert.equal(revealSaid(reveal, ["Do you have any questions about this exercise before we move on?"]), false);
+  assert.equal(revealSaid(reveal, []), false);
 });

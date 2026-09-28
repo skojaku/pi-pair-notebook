@@ -54,6 +54,13 @@ test("nothing found at all still answers notebook.py", () => {
   assert.equal(c.alternatives, undefined);
 });
 
+test("a module folder on its first run makes notebook.py, whatever else is there", () => {
+  // m03: igraph_walkthrough.py at the module root, no notebook.py yet.
+  const c = chooseNotebook({ hasDefault: false, isModule: true, found: ["igraph_walkthrough.py"] });
+  assert.equal(c.file, DEFAULT_NOTEBOOK);
+  assert.equal(c.from, "default");
+});
+
 test("one notebook in the folder needs no configuration", () => {
   const c = chooseNotebook({ hasDefault: false, found: ["mini-project.py"] });
   assert.equal(c.file, "mini-project.py");
