@@ -8,7 +8,7 @@
     "m02-small-world": {
       "toolkit": "v0.14.0"
     },
-    "m03-robustness": {
+    "m03-m04-network-in-code": {
       "toolkit": "v0.22.0"
     }
   }
