@@ -928,31 +928,91 @@ async function resolveSession(signal: AbortSignal): Promise<SessionLookup> {
  */
 async function readHiddenCheck(
   workCell: string,
-): Promise<{ verdict: "pass" | "fail" | "error" | "none"; why?: string }> {
+): Promise<{ verdict: "pass" | "fail" | "error" | "none" | "pending"; why?: string }> {
+  // A press can arrive while marimo is still re-running the cell they just
+  // pasted, and the check under it. Read too early and the check's output is
+  // still the one from the scaffold's blanks, with no verdict in it — which
+  // this used to report as FAIL. In a live m03-m04 session a correct cp1
+  // came back "FAIL"; the tutor, reading code that did the task against a
+  // check that said it did not, spent its whole output budget and said
+  // nothing. So wait for both cells to settle, and never call an unfinished
+  // check a failure.
   const checkCell = workCell.replace(/_work$/, "_check");
-  const r = await runKernel(
-    `import marimo._code_mode as cm\n` +
-      `async with cm.get_context() as ctx:\n` +
-      `    _w = [c for c in ctx.cells if c.name == ${py(workCell)}]\n` +
-      `    _k = [c for c in ctx.cells if c.name == ${py(checkCell)}]\n` +
-      `    if _w and str(_w[0].status) == "exception":\n` +
-      `        print("CHECK error")\n` +
-      `    elif not _k:\n` +
-      `        print("CHECK none")\n` +
-      `    else:\n` +
-      `        _o = _k[0].output\n` +
-      `        _h = str(_o.data) if _o is not None else ""\n` +
-      `        import re as _re\n` +
-      `        _m = _re.search(r'data-tutor-verdict="(pass|fail)"', _h)\n` +
-      `        _y = _re.search(r'data-why="([^"]*)"', _h)\n` +
-      `        print("CHECK", _m.group(1) if _m else "fail", "WHY", _y.group(1) if _y else "")\n`,
-    AbortSignal.timeout(8000),
-  );
-  if (r.failed) return { verdict: "none" };
-  const m = /CHECK (pass|fail|error|none)(?: WHY (.*))?/.exec(r.out);
-  if (!m) return { verdict: "none" };
-  const why = (m[2] ?? "").trim().replace(/&quot;/g, '"').replace(/&amp;/g, "&");
-  return { verdict: m[1] as any, ...(why ? { why } : {}) };
+  // Submit to Tutor is not ▶ Run. A student who pastes or edits and presses
+  // Submit without running hands in code the kernel has never seen: marimo
+  // has saved it to the file (nb_read_code reads that), but the check still
+  // holds the verdict of the last RUN. The instructor did exactly this while
+  // testing m03-m04 with the answer pasted in, and the tutor was told FAIL
+  // for code that does the task. So if the saved code differs from what the
+  // kernel last ran, run it first — the press means "this is my work".
+  try {
+    const saved = cellSource(
+      fs.readFileSync(path.join(process.cwd(), NOTEBOOK_FILE), "utf-8"),
+      workCell,
+    );
+    if (saved?.parses) {
+      await runKernel(
+        `import marimo._code_mode as cm\n` +
+          `_new = ${py(saved.code)}\n` +
+          `async with cm.get_context() as ctx:\n` +
+          `    _w = [c for c in ctx.cells if c.name == ${py(workCell)}]\n` +
+          `    if _w and (_w[0].code or "").strip() != _new.strip():\n` +
+          `        ctx.edit_cell(${py(workCell)}, _new)\n` +
+          `        ctx.run_cell(${py(workCell)})\n`,
+        AbortSignal.timeout(8000),
+      );
+    }
+  } catch {
+    /* no file, or a kernel that will not answer: read what is there */
+  }
+  const busy = new Set(["queued", "running"]);
+  const deadline = Date.now() + 15000;
+  let kickedCheck = false;
+  for (;;) {
+    const r = await runKernel(
+      `import marimo._code_mode as cm\n` +
+        `async with cm.get_context() as ctx:\n` +
+        `    _w = [c for c in ctx.cells if c.name == ${py(workCell)}]\n` +
+        `    _k = [c for c in ctx.cells if c.name == ${py(checkCell)}]\n` +
+        `    print("STATUS", str(_w[0].status) if _w else "-", str(_k[0].status) if _k else "-")\n` +
+        `    if _w and str(_w[0].status) == "exception":\n` +
+        `        print("CHECK error")\n` +
+        `    elif not _k:\n` +
+        `        print("CHECK none")\n` +
+        `    else:\n` +
+        `        _o = _k[0].output\n` +
+        `        _h = str(_o.data) if _o is not None else ""\n` +
+        `        import re as _re\n` +
+        `        _m = _re.search(r'data-tutor-verdict="(pass|fail)"', _h)\n` +
+        `        _y = _re.search(r'data-why="([^"]*)"', _h)\n` +
+        `        print("CHECK", _m.group(1) if _m else "pending", "WHY", _y.group(1) if _y else "")\n`,
+      AbortSignal.timeout(8000),
+    );
+    if (r.failed) return { verdict: "none" };
+    const st = /STATUS (\S+) (\S+)/.exec(r.out);
+    // A check marimo left stale (its input changed, it did not re-run) holds
+    // the verdict of old code. Run it once rather than wait for nothing.
+    if (st && st[2] === "stale" && !kickedCheck) {
+      kickedCheck = true;
+      await runKernel(
+        `import marimo._code_mode as cm\n` +
+          `async with cm.get_context() as ctx:\n` +
+          `    ctx.run_cell(${py(checkCell)})\n`,
+        AbortSignal.timeout(8000),
+      );
+      continue;
+    }
+    const settling = !!st && (busy.has(st[1]) || busy.has(st[2]) || st[2] === "stale");
+    const m = /CHECK (pass|fail|error|none|pending)(?: WHY (.*))?/.exec(r.out);
+    if (!m) return { verdict: "none" };
+    if ((settling || m[1] === "pending") && Date.now() < deadline) {
+      await new Promise((res) => setTimeout(res, 700));
+      continue;
+    }
+    if (settling) return { verdict: "pending" };
+    const why = (m[2] ?? "").trim().replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    return { verdict: m[1] as any, ...(why ? { why } : {}) };
+  }
 }
 
 /**
@@ -2068,6 +2128,32 @@ function moduleView(): "app" | "code" {
  * watcher), or every run reads as a fail. Without the setting a module keeps
  * its button, which is why m01 and m02 are untouched by any of this.
  */
+/**
+ * `"note_on_pass": true` in lesson/index.json: a checkpoint CLOSES the moment
+ * its check passes, so the note cell — the written explanation — is on the
+ * page while the tutor says the reveal and asks for questions, and the next
+ * exercise is built only after the student answers.
+ *
+ * The default order (reveal, "any questions?", then checkpoint_done and the
+ * next build in one turn) put the note on screen for a moment only: the next
+ * exercise landed in the same breath and focus mode hid the one before it,
+ * note and all. The instructor, trying m03-m04, saw no explanation after
+ * solving, and a flash of one after answering "no questions".
+ */
+function nextIsHereEarly(id: string, nextId: string): boolean {
+  const here = loadChapters().find((c) => c.checkpoints.includes(baseCheckpointId(id)));
+  return !!here && here.checkpoints.includes(nextId);
+}
+
+function noteOnPass(): boolean {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
+    return JSON.parse(raw).note_on_pass === true;
+  } catch {
+    return false;
+  }
+}
+
 function wakesOnRun(): boolean {
   try {
     const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
@@ -3932,21 +4018,35 @@ export default function (pi: ExtensionAPI) {
           const found = await readHiddenCheck(widget);
           const what =
             found.verdict === "pass"
-              ? `The hidden check under it says PASS: their code does the task. Say ONE ` +
-                `specific line about what THEY wrote, then ask the checkpoint's own ` +
-                `question, the one the check cannot ask.`
+              ? noteOnPass()
+                ? `The hidden check under it says PASS: their code does the task. Call ` +
+                  `checkpoint_done for this checkpoint FIRST, before you say anything: its ` +
+                  `note cell puts the written explanation on their screen. Its result ` +
+                  `tells you what to say next.`
+                : `The hidden check under it says PASS: their code does the task. Say ONE ` +
+                  `specific line about what THEY wrote, then ask the checkpoint's own ` +
+                  `question, the one the check cannot ask.`
               : found.verdict === "fail"
                 ? `The hidden check under it says FAIL` +
                   (found.why ? ` (${found.why})` : "") +
                   `. Never fix it for them and never write a line of their code. Say what ` +
                   `you can SEE in what they wrote or in what it printed, and ask ONE ` +
-                  `smaller question that gets them to the next step.`
+                  `smaller question that gets them to the next step. If you cannot find ` +
+                  `a wrong line after one careful read, do not keep searching: the likeliest ` +
+                  `reason is that the cell was edited and not run since. Ask them to run ` +
+                  `it and press Submit to Tutor again.`
                 : found.verdict === "error"
                   ? `Their cell raised an error, so nothing was checked; Python's own ` +
                     `message is on their screen under the cell. Point at the ONE line you ` +
                     `can see is wrong and ask a single smaller question about it.`
-                  : `There is no hidden check for this cell. Judge what their code printed ` +
-                    `against the checkpoint yourself.`;
+                  : found.verdict === "pending"
+                    ? `The hidden check has not finished running, so there is no verdict ` +
+                      `yet. Do not tell them anything is wrong. Read their code; if it does ` +
+                      `the task as the script's accept: line says, ask them to run the cell ` +
+                      `once more and press Submit to Tutor again. If you can SEE a wrong ` +
+                      `line, ask ONE smaller question about it.`
+                    : `There is no hidden check for this cell. Judge what their code printed ` +
+                      `against the checkpoint yourself.`;
           pi.sendMessage(
             {
               customType: "student-signal",
@@ -5234,7 +5334,8 @@ export default function (pi: ExtensionAPI) {
       // (m02: the reveal follows their answer), or the reveal's own lines
       // anywhere in this checkpoint (m03: reveal, "any questions?", "no",
       // then a close with nothing more to say).
-      const spokeSince = revealDue
+      // With note_on_pass the close comes BEFORE the reveal, by design.
+      const spokeSince = revealDue && !noteOnPass()
         ? tutorSpokeSinceStudent(ctx) ||
           revealSaid(scriptedReveal(baseCheckpointId(id)), tutorTextsThisCheckpoint(ctx))
         : true;
@@ -5657,7 +5758,22 @@ export default function (pi: ExtensionAPI) {
       // result is the instruction a flash model actually follows.
       const thisChapter = loadChapters().find((c) => c.checkpoints.includes(baseCheckpointId(id)));
       const nextIsHere = !!nextId && !!thisChapter && thisChapter.checkpoints.includes(nextId);
-      const goNext = !nextId
+      const cpBase = baseCheckpointId(id);
+      const holdNext = (then: string) =>
+        `The note cell is on their screen now. In THIS turn, with no tool call before ` +
+        `you speak: say ONE specific line about what THEY wrote, then the ➤ lines of ` +
+        `"${cpBase}"'s reveal_after (the words, not the ➤ mark), then ask "Do you have ` +
+        `any questions about this exercise before we move on?" and END YOUR TURN. Do ` +
+        `NOT ${then} yet. When they answer: a question gets a real answer and ` +
+        `log_detour first, then "Anything else, or shall we move on?"; "no", "next" ` +
+        `or the like → ${then} in that turn.`;
+      const goNext = noteOnPass() && revealDue
+        ? !nextId
+          ? holdNext(`call chapter_done`)
+          : nextIsHereEarly(id, nextId)
+            ? holdNext(`start checkpoint "${nextId}" from your CHAPTER SCRIPT`)
+            : holdNext(`call chapter_done (it loads the chapter that holds "${nextId}")`)
+        : !nextId
         ? `That was the last checkpoint of the module — call chapter_done next.`
         : nextIsHere
           ? `Start checkpoint "${nextId}" NOW: find it in your CHAPTER SCRIPT and ask its ` +
