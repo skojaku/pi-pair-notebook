@@ -163,6 +163,27 @@ const NOTEBOOK_FILE = NOTEBOOK.file;
 const notebookPath = (): string => path.resolve(process.cwd(), NOTEBOOK_FILE);
 
 /**
+ * The drawing call this module's notebook really has, for the examples the
+ * tutor is shown. netviz is m01/m02's; a module without it (m03-m04 draws
+ * with draw_net) had its tutor told "mo.vstack + netviz" by log_detour, call
+ * it, and show the student a NameError before recovering.
+ */
+function pictureCall(): string {
+  for (const f of [NOTEBOOK_FILE, "notebook.template.py"]) {
+    let src = "";
+    try {
+      src = fs.readFileSync(path.resolve(process.cwd(), f), "utf8");
+    } catch {
+      continue;
+    }
+    if (/\bdef netviz\s*\(/.test(src)) return "netviz(edges, highlight=[…])";
+    if (/\bdraw_net\b/.test(src)) return "draw_net(g)";
+    break;
+  }
+  return "an alt.Chart or plt figure";
+}
+
+/**
  * Is there a lesson over this notebook?
  *
  * The one question that separates the two shapes, and it is answered by the
@@ -3838,21 +3859,24 @@ function buildSessionSummary(entries: any[], allCheckpoints: string[]): string {
 
 const JUDGMENTS = ["pass", "pass_with_hints", "guided", "prediction"];
 
-const MARIMO_CELL_RULES =
+const marimoCellRules = (): string =>
   "Cell code rules (marimo is reactive): " +
   "(1) NEVER read a widget's .value in the cell that creates it — marimo forbids it. " +
   "Pattern: one cell makes and displays the widget (w = mo.ui.slider(…) then w as last line), " +
   "a SECOND cell uses w.value. " +
   "(2) Do NOT import mo/nx/np/plt/ig/sns/alt/pd — they already exist (redundant imports are " +
-  "stripped); netviz(edges, highlight=[...]) is also predefined for themed D3 network drawings. " +
+  "stripped). " +
+  (pictureCall().startsWith("an ")
+    ? ""
+    : `${pictureCall()} is predefined for drawing a network; it is the ONLY network drawing call here. `) +
   "(3) Each public variable is owned by exactly ONE cell; prefix throwaway names with _ . " +
   "(4) The cell's LAST expression is what gets displayed; markdown via mo.md(r'''…'''). " +
   "(5) A matplotlib figure renders ONLY as the cell's last expression — NEVER interpolate a " +
   "figure into an mo.md f-string (it prints object gibberish, not an image). UI widgets may " +
   "be embedded in mo.md f-strings; figures may not. " +
-  "(6) Text AND a figure in ONE cell: end with mo.vstack([mo.md(r'''…'''), <figure or " +
-  "netviz(...)>]). NEVER draw a diagram as ASCII art inside markdown — a tiny netviz " +
-  "(it even draws self-loops) or matplotlib figure always looks better.";
+  "(6) Text AND a figure in ONE cell: end with mo.vstack([mo.md(r'''…'''), <a figure or " +
+  `${pictureCall()}>]). NEVER draw a diagram as ASCII art inside markdown — a small ` +
+  "drawing always looks better.";
 
 export default function (pi: ExtensionAPI) {
   // First statement in the factory, before anything that could throw: this is
@@ -4752,7 +4776,7 @@ export default function (pi: ExtensionAPI) {
           const text =
             choice === ASK_Q
               ? `The student has a QUESTION. Do NOT advance. Ask them in plain text what it ` +
-                `is, answer it properly, leave a souvenir cell (mo.vstack: note + netviz/figure ` +
+                `is, answer it properly, leave a souvenir cell (mo.vstack: note + ${pictureCall()} ` +
                 `— never ASCII art), log the detour, then call chapter_done again.`
               : choice === MORE
                 ? // Named objects belong to whichever module wrote them, and this
@@ -6314,14 +6338,14 @@ export default function (pi: ExtensionAPI) {
             ? `NOT LOGGED YET — there is no cell named "${cellName}" in the notebook. ` +
               `nb_edit_cell cannot make one; build it first with nb_add_cell (name ` +
               `"${cellName}"), text and picture in ONE cell —\n` +
-              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), netviz(edges, highlight=[…])])\n` +
+              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), ${pictureCall()}])\n` +
               `— or an nb_add_exercise box if the idea is playable. Then call log_detour ` +
               `again with the same cell_name. Do NOT write a "You asked" line yourself: ` +
               `the extension quotes their question for you, word for word.`
             : `NOT LOGGED YET — the souvenir cell "${cellName}" ${gap}. Fix it with ` +
               `nb_edit_cell so it holds something to see or try (their question is ` +
               `quoted for you — do not add it, and do not reword it) —\n` +
-              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), netviz(edges, highlight=[…])])\n` +
+              `  mo.vstack([mo.md(r"""…the idea, in your words…"""), ${pictureCall()}])\n` +
               `— or an nb_add_exercise box if the idea is playable. Then call log_detour ` +
               `again with the same cell_name.\n` +
               `If words genuinely are the whole answer here, call log_detour again as it ` +
@@ -6335,7 +6359,7 @@ export default function (pi: ExtensionAPI) {
           out:
             `NOT LOGGED YET — a text-only souvenir is the weakest kind of keepsake. Build ` +
             `the cell first with nb_add_cell (name "detour_<topic>"), text and picture in ` +
-            `ONE cell: mo.vstack([mo.md(r"""…"""), netviz(edges, highlight=[…])]) — or an ` +
+            `ONE cell: mo.vstack([mo.md(r"""…"""), ${pictureCall()}]) — or an ` +
             `nb_add_exercise box if the idea is something they can try. Then call ` +
             `log_detour again with cell_name. Their question is quoted for you; do not ` +
             `write a "You asked" line yourself.\n` +
@@ -6407,7 +6431,7 @@ export default function (pi: ExtensionAPI) {
               : `Logged. Souvenir cell "${cellName}" noted.`
             : `Logged — but NO souvenir cell yet. Add one now (nb_add_cell, name ` +
               `"detour_<topic>"): their question quoted plus the idea, text and picture ` +
-              `together in ONE cell (mo.vstack + netviz).`,
+              `together in ONE cell (mo.vstack + ${pictureCall()}).`,
           failed: false,
         });
       }
@@ -6427,7 +6451,7 @@ export default function (pi: ExtensionAPI) {
     label: "Add notebook cell",
     description:
       "Create and run a new cell in the live marimo notebook. " +
-      MARIMO_CELL_RULES,
+      marimoCellRules(),
     promptSnippet: "Add and run a cell in the live marimo notebook",
     promptGuidelines: [
       "Use nb_add_cell / nb_edit_cell / nb_delete_cell / nb_read / nb_run for ALL notebook work — never bash, never raw marimo._code_mode boilerplate.",
@@ -7389,7 +7413,7 @@ export default function (pi: ExtensionAPI) {
     label: "Edit notebook cell",
     description:
       "Replace the body of an existing notebook cell (by the name you gave it in nb_add_cell) and re-run it. " +
-      "Submit the FULL new body. " + MARIMO_CELL_RULES,
+      "Submit the FULL new body. " + marimoCellRules(),
     promptSnippet: "Edit and re-run a cell in the live marimo notebook",
     parameters: Type.Object({
       status: STATUS_PARAM,
