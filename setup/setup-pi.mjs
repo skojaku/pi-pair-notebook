@@ -75,8 +75,27 @@ if (have("git")) {
 }
 
 // --- uv: runs the notebook ---------------------------------------------------
+// marimo's `--sandbox` builds the notebook's own environment with uv and
+// refuses an old one: "uv 0.7.21 or newer is required to manage sandbox
+// environments; found 0.7.13". The notebook server then never starts, the
+// tutor carries on in a plain terminal, and the student hands in a notebook
+// with no work in it. A student who already had an old uv installed was never
+// told, because "uv is installed" was the whole check.
+const UV_MIN = [0, 7, 21];
 const uv = have("uv");
-if (uv) {
+const uvVersion = uv ? /(\d+)\.(\d+)\.(\d+)/.exec(uv)?.slice(1).map(Number) : null;
+const tooOld = (v, min) => {
+  for (let i = 0; i < 3; i++) if (v[i] !== min[i]) return v[i] < min[i];
+  return false;
+};
+if (uv && uvVersion && tooOld(uvVersion, UV_MIN)) {
+  warn(`uv ${uvVersion.join(".")} is too old — the notebook needs ${UV_MIN.join(".")} or newer.`);
+  if (WIN) line(`     ${c.b}winget upgrade astral-sh.uv${c.off}`);
+  else line(`     macOS: ${c.b}brew upgrade uv${c.off}`);
+  line(`     installed some other way: ${c.b}uv self update${c.off}`);
+  line("     Then open a new terminal and re-run me.");
+  todo++;
+} else if (uv) {
   ok(`uv ${uv.replace(/^uv /, "")}`);
 } else {
   warn("uv is missing — it is what runs the notebook.");
