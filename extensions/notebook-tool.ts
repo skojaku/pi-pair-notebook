@@ -75,6 +75,7 @@ import {
   workCellFor,
   cellSource,
   cellNames,
+  showsSomething,
 } from "./lib/pysrc.ts";
 import { announcesClose, callsReferee, revealSaid } from "./lib/turns.ts";
 import {
@@ -6302,11 +6303,7 @@ export default function (pi: ExtensionAPI) {
               }
             }
           }
-          const shows =
-            // draw_*/plot_*: a module's own picture helpers (m03's draw_net,
-            // plot_ccdf, …). A draw_net souvenir was refused twice as "prose
-            // only", and the row still said so after it went in.
-            /netviz\s*\(|mo\.ui\.|mo\.image\s*\(|alt\.Chart|sns\.\w+\s*\(|plt\.\w+\s*\(|\b(?:draw|plot)_\w+\s*\(/.test(src);
+          const shows = showsSomething(src);
           // BOTH faults, and the QUOTE first. `gap` carried one message and
           // `!shows` won the ternary, so a markdown-table souvenir always
           // reported "is prose only" and a missing quote was never mentioned —

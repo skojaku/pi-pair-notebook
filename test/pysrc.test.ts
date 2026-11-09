@@ -23,6 +23,7 @@ import {
   stripRedundantImports,
   workCellFor,
   cellSource,
+  showsSomething,
   cellNames,
 } from "../extensions/lib/pysrc.ts";
 
@@ -466,6 +467,41 @@ describe("cellSource", () => {
     assert.deepEqual(cellSource(NB, "cp2_edit_work"), { code: "edited = g.copy()", parses: true });
   });
 
+  test("a return tuple that marimo wrapped over several lines is dropped whole", () => {
+    // m05 cp5 returns seven names, and marimo writes them one per line. Only
+    // the first line used to be dropped, so the tutor read a syntax error
+    // that was not in the student's cell.
+    const nb = [
+      "@app.cell",
+      "def cp5_compare_work(plot_scores):",
+      "    a = 1",
+      "    plot_scores([a])",
+      "    return (",
+      "        ari_cont,",
+      "        nmi_cont,",
+      "    )",
+      "",
+      "",
+      "@app.cell",
+      "def _():",
+      "    return",
+    ].join("\n");
+    assert.deepEqual(cellSource(nb, "cp5_compare_work"), { code: "a = 1\nplot_scores([a])", parses: true });
+  });
+
+  test("a bracket in the student's own code does not end the cell early", () => {
+    const nb = [
+      "@app.cell",
+      "def c_work():",
+      "    xs = [",
+      "        1,",
+      "        2,",
+      "    ]",
+      "    return (xs,)",
+    ].join("\n");
+    assert.deepEqual(cellSource(nb, "c_work"), { code: "xs = [\n    1,\n    2,\n]", parses: true });
+  });
+
   test("a cell with a syntax error is still found, and says so", () => {
     const c = cellSource(NB, "cp1_build_work");
     assert.ok(c);
@@ -510,5 +546,17 @@ describe("cellSource", () => {
       { input: c!.code, encoding: "utf-8" },
     );
     assert.equal(r.stdout.trim(), "2");
+  });
+});
+
+describe("showsSomething", () => {
+  test("a module's own picture helpers count, inline in a vstack too", () => {
+    assert.ok(showsSomething("mo.vstack([mo.md('x'), show_network(_demo, [0, 1, 1])])"));
+    assert.ok(showsSomething("show_matrix(P)"));
+    assert.ok(showsSomething("draw_net(g)"));
+    assert.ok(showsSomething("formula([(r'x', 'a number')])"));
+  });
+  test("prose alone does not", () => {
+    assert.equal(showsSomething('mo.md(r"""An igraph network has nodes and edges.""")'), false);
   });
 });

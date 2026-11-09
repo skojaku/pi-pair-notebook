@@ -422,9 +422,19 @@ export function cellSource(notebookSrc: string, cell: string): CellSource | null
     }
     // Drop marimo's own bookkeeping: the def line, the trailing `return`
     // tuple it generates, and the blank lines around both.
+    // marimo wraps a long tuple over several lines (`return (` ... `)`), so
+    // the return statement is skipped until its brackets close.
     const kept: string[] = [];
+    let open = 0;
     for (const l of lines.slice(start + 1, end)) {
-      if (/^\s{4}return(\s*$|\s|\()/.test(l)) continue;
+      if (open > 0 || /^\s{4}return(\s*$|\s|\()/.test(l)) {
+        for (const ch of l) {
+          if ("([{".includes(ch)) open++;
+          else if (")]}".includes(ch)) open--;
+        }
+        open = Math.max(open, 0);
+        continue;
+      }
       kept.push(dedent(l));
     }
     while (kept.length && !kept[kept.length - 1].trim()) kept.pop();
@@ -529,4 +539,18 @@ export function pickNotebookSession(
     }
   }
   return null;
+}
+
+/**
+ * Does a souvenir cell hold something to look at or play with?
+ *
+ * A module's own picture helpers count: m03's `draw_net`, `plot_ccdf`, and
+ * m05's `show_network`, `show_matrix`, `plot_world`, `formula`. A souvenir
+ * that called `show_network(...)` inside `mo.vstack` was refused twice as
+ * "prose only", and the row kept saying so after it went in.
+ */
+export function showsSomething(src: string): boolean {
+  return /netviz\s*\(|mo\.ui\.|mo\.image\s*\(|alt\.Chart|sns\.\w+\s*\(|plt\.\w+\s*\(|\b(?:draw|plot|show)_\w+\s*\(|\bformula\s*\(/.test(
+    src,
+  );
 }
