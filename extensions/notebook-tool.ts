@@ -3411,6 +3411,7 @@ async function insertMarkdownCell(
 ): Promise<{ out: string; failed: boolean; reason?: string }> {
   const warm = await ensureWarm(signal);
   if (warm) return warm;
+  await repairPlumbing(signal);
   // A note recovered from an outage belongs to the chapter it was written
   // in, so it must not be the thing that creates the CURRENT chapter's
   // heading — that would file it under a chapter it has nothing to do with.
@@ -6502,6 +6503,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, signal) {
+      await repairPlumbing(signal);
       // A cell body runs in the same kernel nb_run does, and it is hidden from
       // the student by default (hide_code), so it is not the safer door.
       const refusedCode = kernelGuard(params.code);
@@ -6650,6 +6652,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, signal) {
+      await repairPlumbing(signal);
       const name = String(params.name ?? "").trim();
       if (!/^[A-Za-z_]\w*$/.test(name)) {
         return toResult({ out: `'${name}' is not a valid cell name.`, failed: true });
@@ -7119,6 +7122,7 @@ export default function (pi: ExtensionAPI) {
       }),
     }),
     async execute(_id, params, signal) {
+      await repairPlumbing(signal);
       const cpId = String(params.checkpoint ?? "").trim();
       if (!cpId) {
         return toResult({

@@ -67,7 +67,7 @@ export function plumbingDrift(fileSrc: string, templateSrc: string): string[] {
  */
 export function repairScript(force: boolean): string {
   return [
-    "import ast, textwrap",
+    "import ast",
     "from collections import Counter",
     "from pathlib import Path",
     "import marimo._code_mode as cm",
@@ -88,7 +88,7 @@ export function repairScript(force: boolean): string {
     "        _end = _n.body[-1]",
     "        if isinstance(_end, ast.Return) and len(_n.body) > 1:",
     "            _end = _n.body[-2]",
-    "        _code = textwrap.dedent('\\n'.join(_lines[_start:_end.end_lineno]))",
+    "        _code = '\\n'.join(_l[4:] if _l.startswith('    ') else _l for _l in _lines[_start:_end.end_lineno])",
     "        if _code.split('\\n')[0].startswith('# tutor:plumbing'):",
     "            _want.append(_code)",
     "    _need = Counter(c.split('\\n')[0] for c in _want)",

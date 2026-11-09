@@ -35,6 +35,15 @@ const TEMPLATE = [
   "",
   "",
   "@app.cell(hide_code=True)",
+  "def _(mo):",
+  "    # tutor:plumbing — how the exercises work.",
+  '    mo.md(r"""',
+  "- a line at column zero inside a string",
+  '    """)',
+  "    return",
+  "",
+  "",
+  "@app.cell(hide_code=True)",
   "def _():",
   "    # tutor:plumbing — kept below the lesson; see the note above.",
   "    import numpy as np",
@@ -139,6 +148,7 @@ const LIVE_OK = [
   { id: "a", code: 'mo.md(r"""bug report""")' },
   { id: "b", code: "# tutor:plumbing — kept below the lesson; see the note above.\nimport marimo as mo" },
   { id: "c", code: "# tutor:plumbing — the focus-mode switch.\nfocus_mode = mo.ui.switch(value=True)" },
+  { id: "e", code: "# tutor:plumbing — how the exercises work.\nmo.md(r\"\"\"\n- a line at column zero inside a string\n\"\"\")" },
   { id: "d", code: "# tutor:plumbing — kept below the lesson; see the note above.\nimport numpy as np" },
   { id: "h", code: 'mo.md(r"""## Finding Groups in Code""")', name: "ch1_header" },
 ];
@@ -154,10 +164,10 @@ describe("repairScript", { skip: !HAVE_PY }, () => {
     const r = runRepair(true, LIVE_OK);
     assert.equal(r.verdict, "repaired", r.stderr);
     const deleted = r.ops.filter((o: string[]) => o[0] === "delete").map((o: string[]) => o[1]);
-    assert.deepEqual(deleted.sort(), ["b", "c", "d"]);
+    assert.deepEqual(deleted.sort(), ["b", "c", "d", "e"]);
     const created = r.ops.filter((o: string[]) => o[0] === "create").map((o: string[]) => o[1]);
-    assert.equal(created.length, 3);
-    assert.equal(r.ops.filter((o: string[]) => o[0] === "run").length, 3);
+    assert.equal(created.length, 4, "the cell with a column-zero line is recreated too");
+    assert.equal(r.ops.filter((o: string[]) => o[0] === "run").length, 4);
   });
 
   test("live cells that were overwritten by copies: copies go, plumbing returns", () => {
