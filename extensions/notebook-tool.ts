@@ -77,6 +77,7 @@ import {
   cellNames,
   showsSomething,
 } from "./lib/pysrc.ts";
+import { plumbingDrift, repairScript } from "./lib/plumbing.ts";
 import { announcesClose, callsReferee, revealSaid } from "./lib/turns.ts";
 import {
   chooseNotebook,
@@ -3435,6 +3436,36 @@ async function insertMarkdownCell(
 }
 
 /**
+ * Put the plumbing cells back when the notebook has lost some.
+ *
+ * Four of sixteen m05 notebooks came back with the import and the focus
+ * switch overwritten by copies of other cells (`lib/plumbing.ts`). It is
+ * checked here, after every insert, in the FILE as well as the live notebook:
+ * the page can look right while the file will fail on the next reload. At most
+ * three repairs a session, so a notebook that keeps coming back damaged does
+ * not churn forever. Cosmetic in the sense that a failure never blocks an
+ * insert; not cosmetic in what it protects.
+ */
+let plumbingRepairs = 0;
+async function repairPlumbing(signal?: AbortSignal): Promise<void> {
+  if (plumbingRepairs >= 3) return;
+  try {
+    let fileShort = false;
+    try {
+      const file = fs.readFileSync(path.join(process.cwd(), NOTEBOOK_FILE), "utf-8");
+      const tpl = fs.readFileSync(path.join(process.cwd(), "notebook.template.py"), "utf-8");
+      fileShort = plumbingDrift(file, tpl).length > 0;
+    } catch {
+      /* no template or no file: the live check still runs */
+    }
+    const r = await runKernel(repairScript(fileShort), signal);
+    if (!r.failed && r.out.includes("repaired")) plumbingRepairs++;
+  } catch {
+    /* never let a repair break an insert */
+  }
+}
+
+/**
  * Keep the page's furniture BELOW the lesson: every insert lands above the
  * notebook's plumbing, and the ⚖️ "Tutor gets stuck" box stays the last
  * thing of all.
@@ -3458,6 +3489,7 @@ async function insertMarkdownCell(
  * never blocks an insert.
  */
 async function pinFurnitureToBottom(signal?: AbortSignal): Promise<void> {
+  await repairPlumbing(signal);
   try {
     await runKernel(
       `import marimo._code_mode as cm\n` +
