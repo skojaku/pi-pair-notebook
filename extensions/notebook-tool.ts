@@ -78,6 +78,7 @@ import {
   showsSomething,
 } from "./lib/pysrc.ts";
 import { plumbingDrift, repairScript } from "./lib/plumbing.ts";
+import { skipsQuestionAfterPass } from "./lib/pace.ts";
 import { announcesClose, callsReferee, revealSaid } from "./lib/turns.ts";
 import {
   chooseNotebook,
@@ -2174,6 +2175,21 @@ function noteOnPass(): boolean {
     return JSON.parse(raw).note_on_pass === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * `"ask_after_pass": "when_hinted"` in lesson/index.json: a checkpoint passed
+ * with no hint is followed straight by the next one, and the "any questions?"
+ * stop is kept for checkpoints that needed help. m05's sessions: twelve or
+ * more students answered "No" or "move on" at nearly every stop.
+ */
+function askAfterPassSetting(): unknown {
+  try {
+    const raw = fs.readFileSync(path.join(process.cwd(), "lesson", "index.json"), "utf-8");
+    return JSON.parse(raw).ask_after_pass;
+  } catch {
+    return undefined;
   }
 }
 
@@ -5825,12 +5841,20 @@ export default function (pi: ExtensionAPI) {
         `NOT ${then} yet. When they answer: a question gets a real answer and ` +
         `log_detour first, then "Anything else, or shall we move on?"; "no", "next" ` +
         `or the like → ${then} in that turn.`;
+      // No hint, no stop: say the line and the reveal, then go on in this turn.
+      const noStop = skipsQuestionAfterPass(askAfterPassSetting(), judgmentOut, hintsOut);
+      const goOn = (then: string) =>
+        `The note cell is on their screen now. In THIS turn, with no tool call before ` +
+        `you speak: say ONE specific line about what THEY wrote, then the ➤ lines of ` +
+        `"${cpBase}"'s reveal_after (the words, not the ➤ mark). Ask NO question. ` +
+        `Then ${then} in this same turn. If they type a question at any point, answer it first.`;
+      const holdOrGo = (then: string) => (noStop ? goOn(then) : holdNext(then));
       const goNext = noteOnPass() && revealDue
         ? !nextId
-          ? holdNext(`call chapter_done`)
+          ? holdOrGo(`call chapter_done`)
           : nextIsHereEarly(id, nextId)
-            ? holdNext(`start checkpoint "${nextId}" from your CHAPTER SCRIPT`)
-            : holdNext(`call chapter_done (it loads the chapter that holds "${nextId}")`)
+            ? holdOrGo(`start checkpoint "${nextId}" from your CHAPTER SCRIPT`)
+            : holdOrGo(`call chapter_done (it loads the chapter that holds "${nextId}")`)
         : !nextId
         ? `That was the last checkpoint of the module — call chapter_done next.`
         : nextIsHere
